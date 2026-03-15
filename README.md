@@ -124,5 +124,3 @@ z_11     z_12    ...                  # Lines 2+: trace matrix [freq x delay]
 - Cython (optional, for acceleration)
 
 ## License
-
-MIT
