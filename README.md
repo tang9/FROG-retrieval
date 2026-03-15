@@ -7,7 +7,8 @@ Supports **SHG**, **PG**, **THG**, and **SD** FROG geometries.
 ## Quick start
 
 ```bash
-pip install numpy scipy matplotlib pyqtgraph PySide6
+pip install numpy scipy matplotlib pyqtgraph PySide6 Cython
+python setup_cython.py build_ext --inplace
 python frog_gui.py
 ```
 
