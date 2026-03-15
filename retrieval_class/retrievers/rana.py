@@ -133,8 +133,8 @@ DEFAULT_MAX_SPECTRA = 8
 DEFAULT_COARSE_ITER_CAP = 40
 DEFAULT_STALL_ABS_COARSE = 1e-6
 DEFAULT_STALL_RATIO_COARSE = 1e-2
-DEFAULT_STALL_ABS_FULL = 1e-8
-DEFAULT_STALL_RATIO_FULL = 1e-4
+DEFAULT_STALL_ABS_FULL = 5e-8
+DEFAULT_STALL_RATIO_FULL = 1e-3
 
 
 def normalize_field(field: Array) -> Array:
@@ -391,10 +391,10 @@ def _min_gerr(esig: Array, asig: Array, weights: Array) -> tuple[float, float]:
     mx = float(np.max(a2))
     if mx <= 1e-30:
         return 0.0, scale
-    w_sum = float(np.sum(w))
-    if w_sum <= 1e-30:
+    n = float(np.sqrt(a2.size))
+    if n <= 0:
         return float("inf"), 0.0
-    g = float(np.sqrt(np.sum(w * (a2 - scale * e2) ** 2) / w_sum) / mx)
+    g = float(np.sqrt(np.sum(w * (a2 - scale * e2) ** 2)) / mx / n)
     return g, scale
 
 
@@ -967,7 +967,7 @@ def _quickfrog_py(
     weights: Array,
     kernel: _GeometryKernel,
     stop_requested: Optional[Callable[[], bool]] = None,
-) -> tuple[Array, Array, Array, float, float, int, bool]:
+) -> tuple[Array, Array, Array, float, float, int, bool, Array]:
     e = np.asarray(et0, dtype=np.complex128).ravel().copy()
     n = int(max(1, max_iter))
 
@@ -1044,6 +1044,9 @@ def _quickfrog_py(
         if a > 0:
             e = kernel.apply_g_factor(e, a)
 
+        g_hist.append(float(g))
+        gp_hist.append(float(gp))
+
         if g <= g_best:
             g_best = float(g)
             et_best_g = e.copy()
@@ -1058,7 +1061,16 @@ def _quickfrog_py(
         gp_best = _gprime_error(asig_amp, e, weights=weights, kernel=kernel)
         et_best_gp = e.copy()
 
-    return et_best_g, e, et_best_gp, float(g_best), float(gp_best), int(k), bool(stopped)
+    return (
+        et_best_g,
+        e,
+        et_best_gp,
+        float(g_best),
+        float(gp_best),
+        int(k),
+        bool(stopped),
+        np.asarray(g_hist[1:], dtype=np.float64),
+    )
 
 
 def _quickfrog(
@@ -1072,7 +1084,7 @@ def _quickfrog(
     weights: Array,
     kernel: _GeometryKernel,
     stop_requested: Optional[Callable[[], bool]] = None,
-) -> tuple[Array, Array, Array, float, float, int, bool]:
+) -> tuple[Array, Array, Array, float, float, int, bool, Array]:
     if HAS_RANA_CYTHON:
         return _quickfrog_cy(
             asig_amp,
@@ -1110,6 +1122,7 @@ class RANARetriever(Retriever):
         progress_cb: Optional[Callable[[dict], None]],
         stage: str,
         iter_num: int,
+        iter_step: int,
         idx: int,
         total: int,
         field: Array,
@@ -1119,6 +1132,7 @@ class RANARetriever(Retriever):
         g_val: float,
         g_best: float,
         t0: float,
+        g_hist: Optional[Array] = None,
     ) -> None:
         if progress_cb is None:
             return
@@ -1132,7 +1146,11 @@ class RANARetriever(Retriever):
                     best_payload = best_arr
             progress_cb(
                 {
-                    "iter": float(idx),
+                    "iter": float(iter_num),
+                    "iter_step": int(iter_step),
+                    "seed_index": int(idx),
+                    "seed_total": int(total),
+                    "stage": str(stage),
                     "current_gprime": float(np.nan),
                     "best_gprime": float(np.nan),
                     "current_g": float(g_val),
@@ -1143,6 +1161,7 @@ class RANARetriever(Retriever):
                     "field": np.ascontiguousarray(np.asarray(field, dtype=np.complex128)),
                     "best_field": best_payload,
                     "current_trace": current_trace,
+                    "g_hist": None if g_hist is None else np.asarray(g_hist, dtype=np.float64).copy(),
                 }
             )
         except Exception:
@@ -1248,7 +1267,7 @@ class RANARetriever(Retriever):
                 e_out = np.zeros((n_init, seed_use.shape[1]), dtype=np.complex128)
                 measure = np.full(n_init, np.inf, dtype=np.float64)
                 for i in range(n_init):
-                    etb, _, _, g, _, _, stopped = _quickfrog(
+                    etb, _, _, g, _, _, stopped, _ = _quickfrog(
                         asig,
                         seed_use[i, :],
                         max_iter=int(iter_array[level]),
@@ -1271,6 +1290,7 @@ class RANARetriever(Retriever):
                         progress_cb,
                         stage=f"grid {level+1}/{k_levels}",
                         iter_num = iter_array[level],
+                        iter_step = iter_array[level],
                         idx=i + 1,
                         total=n_init,
                         field=etb,
@@ -1306,8 +1326,10 @@ class RANARetriever(Retriever):
                 while (not converged) and (iter_used < iter_total) and (not stopped_by_user):
                     cur_chunk = int(min(chunk, iter_total - iter_used))
                     first_round = (iter_used == 0)
+                    processed_count = 0
+                    chunk_histories: list[Optional[Array]] = [None] * n_init
                     for i in range(n_init):
-                        etb, _, etbp, g, gp, k_it, stopped = _quickfrog(
+                        etb, _, etbp, g, gp, k_it, stopped, g_hist = _quickfrog(
                             asig,
                             fields[i, :],
                             max_iter=cur_chunk,
@@ -1326,31 +1348,41 @@ class RANARetriever(Retriever):
                         g_vals[i] = float(g)
                         iters_done[i] += int(k_it)
                         errors.append(float(g))
+                        processed_count = i + 1
+                        chunk_histories[i] = np.asarray(g_hist, dtype=np.float64)
 
                         if g < best_g_full:
                             best_g_full = float(g)
                             best_field_full = np.asarray(etb, dtype=np.complex128).copy()
-
-                        self._emit_progress(
-                            progress_cb,
-                            stage="full grid",
-                            iter_num = iter_used+cur_chunk,
-                            idx=i + 1,
-                            total=n_init,
-                            field=etb,
-                            best_field=best_field_full,
-                            grid=grid,
-                            measured=measured,
-                            g_val=float(g),
-                            g_best=float(best_g_full),
-                            t0=start,
-                        )
 
                         if g <= g_cutoff:
                             converged = True
                         if stopped:
                             stopped_by_user = True
                             break
+
+                    if processed_count > 0:
+                        valid_g = np.asarray(g_vals[:processed_count], dtype=np.float64)
+                        chunk_best_local = int(np.argmin(valid_g))
+                        chunk_best_field = np.asarray(fields[chunk_best_local, :], dtype=np.complex128)
+                        chunk_best_g = float(valid_g[chunk_best_local])
+                        chunk_best_hist = chunk_histories[chunk_best_local]
+                        self._emit_progress(
+                            progress_cb,
+                            stage="full grid",
+                            iter_num=iter_used + cur_chunk,
+                            iter_step=cur_chunk,
+                            idx=chunk_best_local + 1,
+                            total=processed_count,
+                            field=chunk_best_field,
+                            best_field=best_field_full,
+                            grid=grid,
+                            measured=measured,
+                            g_val=chunk_best_g,
+                            g_best=float(best_g_full),
+                            t0=start,
+                            g_hist=chunk_best_hist,
+                        )
 
                     iter_used += cur_chunk
 

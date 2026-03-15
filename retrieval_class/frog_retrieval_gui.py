@@ -345,6 +345,8 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
         self._trace_diff_raw: Optional[np.ndarray] = None
         self._last_progress_iter: int = 0
         self._last_progress_g: float = float("nan")
+        self._current_g_best_x: list[int] = []
+        self._current_g_best_y: list[float] = []
 
         pg.setConfigOptions(antialias=True)
         self._build_ui()
@@ -515,7 +517,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
         self.plot_diff = self.graphics.addPlot(row=0, col=2, title="Trace difference")
         self.plot_time = self.graphics.addPlot(row=1, col=0, title="Time profile")
         self.plot_freq = self.graphics.addPlot(row=1, col=1, title="Frequency")
-        self.plot_spec = self.graphics.addPlot(row=1, col=2, title="Spectra")
+        self.plot_spec = self.graphics.addPlot(row=1, col=2, title="Current G vs interaction number")
 
         for p in (self.plot_original, self.plot_current, self.plot_diff):
             p.getAxis("left").enableAutoSIPrefix(False)
@@ -527,12 +529,12 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
         self.time_dual = _DualAxisCurve(self.plot_time, "Time (fs)", "Intensity", "Phase (rad)")
         self.freq_dual = _DualAxisCurve(self.plot_freq, "Frequency (PHz)", "Intensity", "Phase (rad)")
 
-        self.plot_spec.setLabel("bottom", "Wavelength (nm)")
-        self.plot_spec.setLabel("left", "Intensity")
+        self.plot_spec.setLabel("bottom", "Interaction number")
+        self.plot_spec.setLabel("left", "Current G")
         self.plot_spec.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot_spec.getAxis("left").enableAutoSIPrefix(False)
         self.plot_spec.showGrid(x=True, y=True, alpha=0.2)
-        self.plot_spec.addLegend()
+        self._current_g_curve = self.plot_spec.plot([], [], pen=pg.mkPen("#111111", width=2.5))
 
         self.btn_open.clicked.connect(self._on_open_clicked)
         self.btn_run.clicked.connect(self._on_run_clicked)
@@ -659,6 +661,83 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
     def _reset_metric_displays(self) -> None:
         self.best_g_display.setText("--")
         self.fwhm_display.setText("--")
+
+    def _reset_current_g_history(self) -> None:
+        self._current_g_best_x = []
+        self._current_g_best_y = []
+        self._refresh_current_g_plot()
+
+    def _refresh_current_g_plot(self) -> None:
+        self.plot_spec.setTitle("Best current G of 4 trials vs interaction number")
+        self.plot_spec.setLabel("bottom", "Interaction number")
+        self.plot_spec.setLabel("left", "Current G")
+        self._current_g_curve.setData(
+            np.asarray(self._current_g_best_x, dtype=np.float64),
+            np.asarray(self._current_g_best_y, dtype=np.float64),
+        )
+        self.plot_spec.autoRange()
+
+    def _append_current_g_history(
+        self,
+        iteration: int,
+        current_g: Optional[float] = None,
+        step_count: int = 1,
+        g_hist: Optional[np.ndarray] = None,
+    ) -> None:
+        try:
+            it = int(iteration)
+            steps = int(step_count)
+        except Exception:
+            return
+        if it <= 0:
+            return
+
+        hist_arr = None
+        if g_hist is not None:
+            try:
+                hist_arr = np.asarray(g_hist, dtype=np.float64).ravel()
+            except Exception:
+                hist_arr = None
+            if hist_arr is not None:
+                hist_arr = hist_arr[np.isfinite(hist_arr)]
+
+        if hist_arr is not None and hist_arr.size > 0:
+            new_y = hist_arr.tolist()
+            new_x = list(range(max(1, it - hist_arr.size + 1), it + 1))
+        else:
+            if current_g is None:
+                return
+            g_val = float(current_g)
+            if not np.isfinite(g_val):
+                return
+            if steps <= 0:
+                steps = 1
+            new_x = list(range(max(1, it - steps + 1), it + 1))
+            new_y = [g_val] * len(new_x)
+
+        if not self._current_g_best_x:
+            self._current_g_best_x = new_x
+            self._current_g_best_y = new_y
+            self._refresh_current_g_plot()
+            return
+
+        keep = 0
+        start_x = new_x[0]
+        while keep < len(self._current_g_best_x) and self._current_g_best_x[keep] < start_x:
+            keep += 1
+        self._current_g_best_x = self._current_g_best_x[:keep]
+        self._current_g_best_y = self._current_g_best_y[:keep]
+
+        x_to_idx = {x: idx for idx, x in enumerate(self._current_g_best_x)}
+        for x, y in zip(new_x, new_y):
+            idx = x_to_idx.get(x)
+            if idx is None:
+                self._current_g_best_x.append(x)
+                self._current_g_best_y.append(float(y))
+                x_to_idx[x] = len(self._current_g_best_x) - 1
+            else:
+                self._current_g_best_y[idx] = float(y)
+        self._refresh_current_g_plot()
 
     def _update_metric_displays(self, best_g: Optional[float], best_field: Optional[np.ndarray]) -> None:
         if best_g is not None and np.isfinite(float(best_g)):
@@ -827,6 +906,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
 
         self._reset_progress_labels()
         self._reset_metric_displays()
+        self._reset_current_g_history()
         self._last_progress_iter = 0
         self._last_progress_g = float("nan")
         self.btn_run.setEnabled(False)
@@ -909,6 +989,12 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
         field_arr = np.asarray(field, dtype=np.complex128) if field is not None else None
         best_field_arr = np.asarray(best_field, dtype=np.complex128) if best_field is not None else None
         best_g = payload_obj.get("best_g")
+        current_g = payload_obj.get("current_g")
+        step_count = int(payload_obj.get("iter_step", 1))
+        g_hist = payload_obj.get("g_hist")
+        stage = str(payload_obj.get("stage", ""))
+        if stage == "full grid" and current_g is not None:
+            self._append_current_g_history(it, float(current_g), step_count=step_count, g_hist=g_hist)
         self._update_metric_displays(float(best_g) if best_g is not None else None, best_field_arr)
 
         self._draw_trace(
@@ -1248,11 +1334,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
             self.plot_diff.setTitle("Trace difference")
         self.time_dual.clear("Time profile")
         self.freq_dual.clear("Frequency")
-        self.plot_spec.clear()
-        self.plot_spec.addLegend()
-        self.plot_spec.setTitle("Spectra")
-        self.plot_spec.setLabel("bottom", "Wavelength (nm)")
-        self.plot_spec.setLabel("left", "Intensity")
+        self._reset_current_g_history()
 
     def _trace_colormap_for_plot(self, plot_item: pg.PlotItem):
         if plot_item is self.plot_diff:
@@ -1366,48 +1448,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
             f"Frequency (best G FWHM={fwhm_f:.3g} PHz)",
         )
 
-        self.plot_spec.clear()
-        self.plot_spec.addLegend()
-        self.plot_spec.setTitle("Spectra (intensity vs wavelength)")
-        self.plot_spec.setLabel("bottom", "Wavelength (nm)")
-        self.plot_spec.setLabel("left", "Intensity")
-
-        mask_ret = freq > 0
-        if np.any(mask_ret):
-            wl_ret = SPEED_LIGHT / (freq[mask_ret] * 1e15) * 1e9
-            int_ret = _safe_normalize(best_freq_int[mask_ret])
-            order = np.argsort(wl_ret)
-            self.plot_spec.plot(
-                wl_ret[order],
-                int_ret[order],
-                pen=pg.mkPen("#111111", width=2.5),
-                name="best G",
-            )
-            if curr_freq_int is not None:
-                int_cur = _safe_normalize(curr_freq_int[mask_ret])
-                self.plot_spec.plot(
-                    wl_ret[order],
-                    int_cur[order],
-                    pen=pg.mkPen("#D62728", width=2.5),
-                    name="current",
-                )
-
-        # Map the measured trace marginal onto the corresponding fundamental field axis.
-        freq_meas = np.asarray(self.frg_data.frequency, dtype=np.float64) / _trace_frequency_multiplier(
-            getattr(self.frg_data, "geometry", "shg-frog")
-        )
-        marg_meas = _safe_normalize(np.sum(np.asarray(measured_trace, dtype=np.float64), axis=0))
-        mask_meas = freq_meas > 0
-        if np.any(mask_meas):
-            wl_meas = SPEED_LIGHT / (freq_meas[mask_meas] * 1e15) * 1e9
-            int_meas = marg_meas[mask_meas]
-            order = np.argsort(wl_meas)
-            self.plot_spec.plot(
-                wl_meas[order],
-                int_meas[order],
-                pen=pg.mkPen("#009E73", width=2.5, style=QtCore.Qt.PenStyle.DashDotLine),
-                name="Marginal",
-            )
+        self._refresh_current_g_plot()
 
 
 def main() -> None:

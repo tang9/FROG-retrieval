@@ -203,10 +203,10 @@ def _min_gerr(esig, asig, weights):
     mx = float(np.max(a2))
     if mx <= 1e-30:
         return 0.0, scale
-    w_sum = float(np.sum(w))
-    if w_sum <= 1e-30:
+    n = float(np.sqrt(a2.size))
+    if n <= 0:
         return float("inf"), 0.0
-    g = float(np.sqrt(np.sum(w * (a2 - scale * e2) ** 2) / w_sum) / mx)
+    g = float(np.sqrt(np.sum(w * (a2 - scale * e2) ** 2)) / mx / n)
     return g, scale
 
 
@@ -588,6 +588,9 @@ def quickfrog_cy(
         if a > 0:
             e = _apply_g_factor_code(e, a, geom)
 
+        g_hist.append(float(g))
+        gp_hist.append(float(gp))
+
         if g <= g_best:
             g_best = float(g)
             et_best_g = e.copy()
@@ -602,4 +605,13 @@ def quickfrog_cy(
         gp_best = _gprime_error(asig_amp, e, weights, geometry)
         et_best_gp = e.copy()
 
-    return et_best_g, e, et_best_gp, float(g_best), float(gp_best), int(k), bool(stopped)
+    return (
+        et_best_g,
+        e,
+        et_best_gp,
+        float(g_best),
+        float(gp_best),
+        int(k),
+        bool(stopped),
+        np.asarray(g_hist[1:], dtype=np.float64),
+    )
