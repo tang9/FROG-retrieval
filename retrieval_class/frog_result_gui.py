@@ -76,6 +76,10 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
 
         mat_row = QtWidgets.QHBoxLayout()
         layout.addLayout(mat_row)
+        mat_row.addWidget(QtWidgets.QLabel("Fit order"))
+        self.fit_order_edit = QtWidgets.QLineEdit("3")
+        self.fit_order_edit.setMaximumWidth(80)
+        mat_row.addWidget(self.fit_order_edit)
         mat_row.addWidget(QtWidgets.QLabel("Material"))
         self.material_combo = QtWidgets.QComboBox()
         self.material_combo.addItem("None")
@@ -152,6 +156,7 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
         self.freq_max_edit.editingFinished.connect(self.redraw)
         self.add_gdd_edit.editingFinished.connect(self.redraw)
         self.add_tod_edit.editingFinished.connect(self.redraw)
+        self.fit_order_edit.editingFinished.connect(self.redraw)
         self.material_combo.currentTextChanged.connect(self.redraw)
         self.material_thickness_edit.editingFinished.connect(self.redraw)
         self.redraw()
@@ -359,6 +364,18 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
             return None, None
         return vmin, vmax
 
+    def _parse_fit_order(self):
+        txt = self.fit_order_edit.text().strip()
+        try:
+            fit_order = int(txt) if txt else 3
+        except ValueError:
+            self._notify("Invalid input: fit order must be an integer.", error=True)
+            return None
+        if fit_order < 3:
+            self._notify("Invalid input: fit order must be at least 3.", error=True)
+            return None
+        return fit_order
+
     def _set_top_ticks(self, x):
         if len(x) < 2:
             return
@@ -406,9 +423,12 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
         self.time_plot.clear()
         try:
             fmin, fmax = self._parse_range()
+            fit_order = self._parse_fit_order()
+            if fit_order is None:
+                return
             add_gdd, add_tod = self._parse_dispersion_add()
             material, thickness_mm = self._parse_material_addition()
-            res = self.result_obj.get_GDD_TOD(freq_min=fmin, freq_max=fmax)
+            res = self.result_obj.get_GDD_TOD(freq_min=fmin, freq_max=fmax, fit_order=fit_order)
 
             freq = np.asarray(self.result_obj.freq, dtype=float)
             phase = np.asarray(self.result_obj.freq_phase, dtype=float)

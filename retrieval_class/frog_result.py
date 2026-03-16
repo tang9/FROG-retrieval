@@ -133,7 +133,7 @@ class FROG_result:
         self.time_FTL_intensity = b["time_FTL_intensity"][idx_ftl]
         self._time_reversed = True
 
-    def get_GDD_TOD(self,freq_min=None, freq_max=None):
+    def get_GDD_TOD(self, freq_min=None, freq_max=None, fit_order=3):
         #calculate GDD and TOD from frequency phase
         #GDD = d2phi/dw2, TOD = d3phi/dw3
         angular_freq = self.freq * 2 * np.pi
@@ -153,10 +153,14 @@ class FROG_result:
         idx_max = find_index(angular_freq, angular_freq_max)
         angular_freq = angular_freq[idx_min:idx_max] - angular_freq0
         phase = self.freq_phase[idx_min:idx_max]
-        p = np.polyfit(angular_freq, phase, 3)
-        phase_fit = p[0] * angular_freq**3 + p[1] * angular_freq**2 + p[2] * angular_freq + p[3]
-        GDD = 2 * p[1]
-        TOD = 6 * p[0]
+        if len(angular_freq) < 4:
+            raise ValueError("Not enough frequency points for phase polynomial fit.")
+        fit_order = max(3, min(int(fit_order), len(angular_freq) - 1))
+        p = np.polyfit(angular_freq, phase, fit_order)
+        phase_fit = np.polyval(p, angular_freq)
+        poly = np.poly1d(p)
+        GDD = float(np.polyder(poly, 2)(0.0))
+        TOD = float(np.polyder(poly, 3)(0.0))
         return {
             "GDD": GDD,
             "TOD": TOD,
@@ -164,6 +168,7 @@ class FROG_result:
             "angular_freq": angular_freq + angular_freq0,
             "angular_freq0": angular_freq0,
             "phase": phase,
+            "fit_order": fit_order,
         }
     
     def dispersion_compensation(self, GDD=0, TOD=0):
