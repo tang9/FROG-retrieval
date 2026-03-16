@@ -613,22 +613,22 @@ class FROG:
                 label="Gaussian Fit, FWHM=%.1f"%(self.autocorrelation_fit.param[2]*2.35482))
         ax.legend()
 
+    """Deprecated output method for raw-grid .frg export, no longer used by current GUI pipeline.
     def output_frg(self):
-        """
-        === file structure of .frg, for matlab binned input ===
-        width(temporal domain) of FROG trace in pixel \t  
-        height(spectral domain) of FROG trace in pixel \t 
-        temporal_calibration (fs/px) \t  
-        spectral_calibration (nm/px) \t   
-        central_wavelength (nm) \t\n
-        FROG_TRACE_RAW_DATA
-        === EOF ===
-        Example 
-        === xxx.frg ===
-        512	512	20.54542	9.506378e-05	0.3747406
-        [512 x 512] matrix
-        === EOF === 
-        """
+        #Legacy implementation kept here intentionally, but masked out.
+        # === file structure of .frg, for matlab binned input ===
+        # width(temporal domain) of FROG trace in pixel \t  
+        # height(spectral domain) of FROG trace in pixel \t 
+        # temporal_calibration (fs/px) \t  
+        # spectral_calibration (nm/px) \t   
+        # central_wavelength (nm) \t\n
+        # FROG_TRACE_RAW_DATA
+        # === EOF ===
+        # Example 
+        # === xxx.frg ===
+        # 512	512	20.54542	9.506378e-05	0.3747406
+        # [512 x 512] matrix
+        # === EOF === 
         x,y,res = self.delay,self.wavelength,self.frog_trace
         width = len(x)
         height = len(y)
@@ -644,7 +644,8 @@ class FROG:
                 for i in range(len(x)):
                     f.write("%f\t"%res[i,j])
                 f.write("\n")
-    
+    """
+
     def output_binned(self):
         """
         === file structure of _binned.frg ===

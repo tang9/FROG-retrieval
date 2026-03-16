@@ -24,7 +24,7 @@ Simulate  ->  Convert  ->  Retrieval  ->  Result
 |-----|---------|
 | **0) Simulate** | Generate simulated FROG traces from user-defined pulses (Gaussian spectrum or loaded from file). |
 | **1) Convert** | Load raw experimental FROG data, subtract background, apply noise filters, and bin into an N×N frequency-domain `.frg` trace. |
-| **2) Retrieval** | Run the RANA pulse-retrieval algorithm on a `.frg` trace. Monitor convergence in real time. |
+| **2) Retrieval** | Run the RANA pulse-retrieval algorithm on a `.frg` trace (or .dat file from Trebino export, saved from retrieval). Monitor convergence in real time. |
 | **3) Result** | Visualise retrieved pulse in time/frequency/wavelength domains. Phase analysis with GDD/TOD fitting and dispersion compensation using material databases. |
 
 Auto-transfer checkboxes (`Convert->Retrieval`, `Retrieval->Result`) are enabled by default for a seamless one-click workflow.
@@ -83,38 +83,112 @@ refractive_index/                    # Material dispersion data (Sellmeier coeff
 setup_cython.py                      # Build script for Cython extensions
 ```
 
-## Output files
+## File formats
 
-After retrieval, export writes the following files (given a prefix like `trace_binned256`):
+### Raw text trace for the Convert tab
 
-| File | Content |
-|------|---------|
-| `prefix.A.dat` | Measured FROG trace |
-| `prefix.Arecon.dat` | Reconstructed FROG trace |
-| `prefix.Ek.dat` | Retrieved time-domain field (time, intensity, phase) |
-| `prefix.Ew.dat` | Retrieved frequency-domain field (frequency, intensity, phase) |
-| `prefix.Speck.dat` | Wavelength-domain spectrum and phase |
+The Convert tab reads plain-text experimental traces with this layout:
 
-## Input file format
-
-### Raw FROG trace (for Convert tab)
-
-Plain text file:
-```
-delay_1  delay_2  delay_3  ...        # Line 1: delay values
-wl_1     wl_2     wl_3     ...        # Line 2: wavelength values (nm)
-z_11     z_12     z_13     ...        # Lines 3+: trace matrix (one row per delay)
+```text
+delay_1  delay_2  delay_3  ...        # first numeric row: delay or motor positions
+wl_1     wl_2     wl_3     ...        # second numeric row: wavelength in nm
+z_11     z_12     z_13     ...        # remaining rows: one spectrum per delay
 z_21     z_22     z_23     ...
 ...
 ```
 
-### `.frg` file (for Retrieval tab)
+Notes:
 
+- Any title/comment lines before the first numeric row are ignored.
+- The first numeric row is interpreted using the selected delay-step unit (`nm`, `um`, `mm`, `m`, `fs`, `ps`, `as`).
+- The trace matrix is stored as `N_delay x N_wavelength`.
+- Multiple raw files can be loaded and averaged in the Convert tab before binning.
+
+### `.frg` trace for the Retrieval tab
+
+The Retrieval tab reads the `.frg` files written by the converter. The first line always contains five numbers:
+
+```text
+N_delay  N_freq  dt  dv  center
 ```
-N_delay  N_freq  dt  dv  v0           # Line 1: grid parameters
-z_11     z_12    ...                  # Lines 2+: trace matrix [freq x delay]
+
+followed by `N_freq` rows of trace data, each row containing `N_delay` intensity samples.
+
+The active `.frg` file written by the converter is `prefix_binnedN.frg`, a square frequency-domain trace used for retrieval. Here `dt` is in fs/pixel, `dv` is in PHz/pixel, and `center` is the trace-center frequency in PHz.
+
+The matrix in the file is written as fixed-frequency rows and delay columns.
+
+### `.dat` trace for the Retrieval tab
+
+The Retrieval tab can also open the trace format written by the retrieval exporter (`.A.dat` / `.Arecon.dat`):
+
+```text
+N_delay  N_freq
+z_min    z_max
+wl_1
+wl_2
+...
+wl_Nfreq
+delay_1
+delay_2
+...
+delay_Ndelay
+z_11
+z_12
 ...
 ```
+
+After the two-line header, the file contains:
+
+- `N_freq` wavelength values in nm
+- `N_delay` delay values in fs
+- `N_delay * N_freq` trace samples flattened in delay-major order
+
+### Retrieved field profile files
+
+The retrieval exporter writes `Ek.dat`, `Ew.dat`, and `Speck.dat` as five-column text files with no header:
+
+```text
+axis    intensity    phase    real(field)    imag(field)
+```
+
+where the axis is:
+
+- time in fs for `Ek.dat`
+- frequency in PHz for `Ew.dat`
+- wavelength in nm for `Speck.dat`
+
+Intensity is normalized to a peak value of 1, and phase is the unwrapped retrieved phase referenced to the peak of the profile.
+
+## Output files
+
+### Convert tab outputs
+
+`Save Convert` writes these files next to the chosen prefix:
+
+| File | Content |
+|------|---------|
+| `prefix_binnedN.frg` | Square, normalized retrieval input trace (`N x N`) in frequency-delay coordinates |
+| `prefix_processed_N{N}.png` | Snapshot of the processed Convert-tab figure |
+| `prefix_processed_N{N}.txt` | JSON parameter dump for the current Convert-tab settings |
+
+The converter also writes this auxiliary text export:
+
+| File | Content |
+|------|---------|
+| `prefix_processed.txtSpecScan` | Processed text trace with delay row, wavelength row, then `N_delay x N_wavelength` matrix |
+
+### Retrieval tab outputs
+
+After retrieval, export writes the following files for a prefix such as `trace_binned256`:
+
+| File | Content |
+|------|---------|
+| `prefix.A.dat` | Measured FROG trace in retrieval-export `.dat` format |
+| `prefix.Arecon.dat` | Reconstructed FROG trace in the same `.dat` format |
+| `prefix.Ek.dat` | Retrieved time-domain field: time, normalized intensity, phase, real(E), imag(E) |
+| `prefix.Ew.dat` | Retrieved frequency-domain field: frequency, normalized intensity, phase, real(E), imag(E) |
+| `prefix.Speck.dat` | Retrieved wavelength-domain spectrum: wavelength, normalized intensity, phase, real(E), imag(E) |
 
 ## Requirements
 

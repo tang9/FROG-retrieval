@@ -278,7 +278,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
 
         self.wavelength_bin = QtWidgets.QLineEdit("1")
         self.noise_filter = QtWidgets.QComboBox()
-        self.noise_filter.addItems(["", "Gaussian", "Fourier"])
+        self.noise_filter.addItems(["", "Gaussian", "Low pass"])
         self.sigma = QtWidgets.QLineEdit("1")
         self.cutoff = QtWidgets.QLineEdit("8")
         self.constant_bkg = QtWidgets.QLineEdit("0")
@@ -289,8 +289,8 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         add_pair(3, "wavelength_bin", self.wavelength_bin)
         add_pair(4, "noise_filter", self.noise_filter)
         add_pair(5, "filter_axis", self.filter_axis)
-        add_pair(6, "sigma", self.sigma)
-        add_pair(7, "cutoff", self.cutoff)
+        add_pair(6, "sigma (Gaussian)", self.sigma)
+        add_pair(7, "cutoff ratio (Low pass)", self.cutoff)
 
         self.delay_step = QtWidgets.QComboBox()
         self.delay_step.addItems(["fs", "mm", "nm", "um", "m", "ps", "as"])
@@ -307,7 +307,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.time_zero.setChecked(True)
         add_pair(8, "delay_step", self.delay_step)
         add_pair(9, "delay_correction", self.delay_correction)
-        add_pair(10, "edge", self.edge)
+        add_pair(10, "edge pixels", self.edge)
         add_pair(11, "constant_bkg", self.constant_bkg)
         add_pair(12, "mask_frg", self.mask_frg)
         add_check(13, self.time_zero)
