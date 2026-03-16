@@ -74,14 +74,80 @@ def _field_center_frequency(trace_center: float, geometry: str) -> float:
     return float(trace_center) / _trace_frequency_multiplier(geometry)
 
 
+def _parse_text_number(token: str) -> float:
+    text = str(token).strip()
+    if not text:
+        raise ValueError("Empty numeric token.")
+    # Accept locale-style decimal commas in imported trace files.
+    if "," in text and "." not in text:
+        text = text.replace(",", ".")
+    return float(text)
+
+
+def _parse_number_line(line: str) -> list[float]:
+    return [_parse_text_number(part) for part in str(line).split()]
+
+
 def _read_frg_file(path: str) -> FrgData:
-    """Load a .frg file using the formats emitted by frog_convert.py."""
+    """Load a `.frg` or `.dat` FROG trace into the GUI container."""
+    lower_path = str(path).strip().lower()
+    if lower_path.endswith(".dat"):
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        if len(lines) < 3:
+            raise ValueError("Invalid .dat file: expected header, limits, and data.")
+
+        header = _parse_number_line(lines[0])
+        if len(header) < 2:
+            raise ValueError("Invalid .dat header. Expected width and height.")
+
+        width = int(round(header[0]))
+        height = int(round(header[1]))
+        if width <= 1 or height <= 1:
+            raise ValueError(f"Invalid dimensions in .dat header: width={width}, height={height}")
+        if width != height:
+            raise ValueError(f"Retrieval currently requires square traces. Got {width}x{height}.")
+
+        values: list[float] = []
+        for line in lines[1:]:
+            values.extend(_parse_number_line(line))
+
+        required = 2 + height + width + width * height
+        if len(values) < required:
+            raise ValueError(
+                f".dat data too short: expected at least {required} values after the header, got {len(values)}."
+            )
+
+        offset = 2  # z_min, z_max
+        wavelength_nm = np.asarray(values[offset : offset + height], dtype=np.float64)
+        offset += height
+        delay = np.asarray(values[offset : offset + width], dtype=np.float64)
+        offset += width
+        trace = np.asarray(values[offset : offset + width * height], dtype=np.float64).reshape((width, height))
+
+        wavelength_nm = np.clip(wavelength_nm, 1e-12, None)
+        frequency = SPEED_LIGHT / (wavelength_nm * 1e-9) / 1e15
+        trace = np.nan_to_num(trace, nan=0.0, posinf=0.0, neginf=0.0)
+        trace = np.clip(trace, 0.0, None).T
+        max_trace = float(np.max(trace))
+        if max_trace > 1e-15:
+            trace /= max_trace
+
+        return FrgData(
+            path=path,
+            delay=delay,
+            frequency=frequency,
+            frequency_center=_center_bin_value(frequency),
+            trace=trace,
+        )
+
+    # Load a .frg file using the formats emitted by frog_convert.py.
     with open(path, "r", encoding="utf-8") as f:
         lines = [ln.strip() for ln in f if ln.strip()]
     if not lines:
         raise ValueError("Empty .frg file.")
 
-    header = [float(v) for v in lines[0].split()]
+    header = _parse_number_line(lines[0])
     if len(header) < 5:
         raise ValueError("Invalid .frg header. Expected at least 5 numbers.")
 
@@ -94,7 +160,7 @@ def _read_frg_file(path: str) -> FrgData:
 
     values: list[float] = []
     for line in lines[1:]:
-        values.extend(float(v) for v in line.split())
+        values.extend(_parse_number_line(line))
     expected = width * height
     if len(values) < expected:
         raise ValueError(f"Trace matrix too short: expected {expected} values, got {len(values)}.")
@@ -377,7 +443,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
         top_row.setSpacing(4)
         vbox.addLayout(top_row)
 
-        self.btn_open = QtWidgets.QPushButton("Open .frg")
+        self.btn_open = QtWidgets.QPushButton("Open Binned Trace")
         self.btn_open.setStyleSheet("background-color: #90EE90;")  # light green
         self.btn_run = QtWidgets.QPushButton("Run Retrieval")
         self.btn_run.setStyleSheet("background-color: #90EE90;")
@@ -877,9 +943,9 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
     def _on_open_clicked(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Open FRG File",
+            "Open Trace File",
             self._last_dir,
-            "FRG files (*.frg);;All files (*)",
+            "Trace files (*.frg *.dat);;FRG files (*.frg);;A.dat files (*.dat);;All files (*)",
         )
         if not path:
             return
@@ -892,7 +958,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
 
     def _on_run_clicked(self) -> None:
         if self.frg_data is None:
-            QtWidgets.QMessageBox.warning(self, "No Data", "Please open a .frg file first.")
+            QtWidgets.QMessageBox.warning(self, "No Data", "Please open a .frg or .dat file first.")
             return
         if self._thread is not None and self._thread.isRunning():
             QtWidgets.QMessageBox.information(self, "Busy", "Retrieval is already running.")
@@ -1266,7 +1332,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
 
     def _on_save_clicked(self) -> None:
         if self.frg_data is None:
-            QtWidgets.QMessageBox.warning(self, "No Data", "Please open a .frg file first.")
+            QtWidgets.QMessageBox.warning(self, "No Data", "Please open a .frg or .dat file first.")
             return
         if self.result is None:
             QtWidgets.QMessageBox.warning(self, "No Result", "Please run retrieval before saving.")
