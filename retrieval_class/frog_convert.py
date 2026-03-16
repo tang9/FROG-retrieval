@@ -133,7 +133,7 @@ class FROG:
             #### Noise Filter
             if noise_filter.find("Gaussian") != -1:
                 self.GaussianFilter(sigma,axis=filter_axis or "both")
-            elif noise_filter.find("Fourier") != -1:
+            elif noise_filter.find("Low_pass") != -1:
                 self.FourierFilter("Butterworth",cutoff,axis=filter_axis or "both")
             _mark(f"noise_filter:{noise_filter or 'none'}")
             #resudce constant background

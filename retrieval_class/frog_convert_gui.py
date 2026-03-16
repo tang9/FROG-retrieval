@@ -278,7 +278,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
 
         self.wavelength_bin = QtWidgets.QLineEdit("1")
         self.noise_filter = QtWidgets.QComboBox()
-        self.noise_filter.addItems(["", "Gaussian", "Low pass"])
+        self.noise_filter.addItems(["", "Gaussian", "Low_pass"])
         self.sigma = QtWidgets.QLineEdit("1")
         self.cutoff = QtWidgets.QLineEdit("8")
         self.constant_bkg = QtWidgets.QLineEdit("0")
