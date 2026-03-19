@@ -130,7 +130,7 @@ class FrogPipelineGUI(QtWidgets.QMainWindow):
     def save_all(self) -> None:
         """Trigger all save actions in the pipeline."""
         self.convert_gui.save_param_btn.click()
-        self.convert_gui.save_btn.click()
+        self.convert_gui.save_results()
         self.retrieval_gui.btn_save.click()
         self.result_gui.save_btn.click()
         try:
