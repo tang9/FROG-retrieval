@@ -201,6 +201,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.raw_obj = None
         self.proc_obj = None
         self._raw_data_dict = None
+        self._raw_source = None
         self._cbars = {}
         self.last_dir = os.getcwd()
         self.one_d_dialog = None
@@ -225,6 +226,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.raw_obj = None
         self.proc_obj = None
         self._raw_data_dict = None
+        self._raw_source = None
         self.redraw()
         if hasattr(self, "one_d_dialog") and self.one_d_dialog is not None:
             self.one_d_dialog.clear_view()
@@ -635,18 +637,23 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         return out_path
 
     def reload_raw(self):
-        """Reload raw data: re-read from file if path is valid, otherwise rebuild from in-memory dict."""
+        """Reload raw data using the current GUI parameters."""
+        self._reload_raw_with_current_params()
+
+    def _reload_raw_with_current_params(self) -> bool:
+        """Refresh raw_obj from the original source with the current parameters."""
         path = self.file_edit.text().strip()
         if path and os.path.isfile(path):
             self.load_raw()
-        elif self._raw_data_dict is not None:
+        elif self._raw_source is not None:
             self._reload_from_dict()
         else:
             self.load_raw()  # will show appropriate error
+        return self.raw_obj is not None and np.size(getattr(self.raw_obj, "frog_trace", [])) > 0
 
     def _reload_from_dict(self):
-        """Rebuild raw_obj from the stored _raw_data_dict."""
-        d = self._raw_data_dict
+        """Rebuild raw_obj from the original in-memory source."""
+        d = self._raw_source
         old_proc = self.proc_obj
         self.raw_obj = None
         self.proc_obj = None
@@ -696,6 +703,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                 time_range=p["time_range"],
                 raw=True,
             )
+            self._raw_source = os.path.abspath(path)
             raw_delay = np.asarray(getattr(self.raw_obj, "delay", []), dtype=float).ravel()
             raw_wave = np.asarray(getattr(self.raw_obj, "wavelength", []), dtype=float).ravel()
             raw_trace = np.asarray(getattr(self.raw_obj, "frog_trace", []), dtype=float)
@@ -735,6 +743,12 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         if trace.shape != (delay.size, wavelength.size):
             raise ValueError(f"Trace shape {trace.shape} vs delay {delay.size} x wavelength {wavelength.size}")
         self._reset_cached_state()
+        self._raw_source = {
+            "delay": delay.copy(),
+            "wavelength": wavelength.copy(),
+            "frog_trace": trace.copy(),
+            "prefix": "simulated",
+        }
         self._raw_data_dict = {
             "delay": delay.copy(),
             "wavelength": wavelength.copy(),
@@ -742,7 +756,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
             "prefix": "simulated",
         }
         self.raw_obj = FROG(
-            self._raw_data_dict,
+            self._raw_source,
             delay_step="fs",
             delay_correction=1.0,
             raw=True,
@@ -754,13 +768,17 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self._status_info("Loaded simulated FROG trace from Simulate tab.")
 
     def process(self):
-        if self._raw_data_dict is None:
+        if self._raw_source is None and self._raw_data_dict is None:
             self._status_warn("No raw data loaded: please Open or Reload first.")
             return
         try:
+            if not self._reload_raw_with_current_params():
+                self._status_warn("Run convert stopped: raw reload with current parameters failed.")
+                return
             p = self._collect_params()
+            source_input = self._raw_source if self._raw_source is not None else self._raw_data_dict
             self.proc_obj = FROG(
-                self._raw_data_dict,
+                source_input,
                 wavelength_range=p["wavelength_range"],
                 wavelength_bin=p["wavelength_bin"],
                 noise_filter=p["noise_filter"],
@@ -786,7 +804,10 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
             payload = self.export_retrieval_payload()
             if payload is not None:
                 self.retrieval_data_ready.emit(payload)
-            label = self._raw_data_dict.get("prefix", "frog")
+            if isinstance(source_input, dict):
+                label = source_input.get("prefix", "frog")
+            else:
+                label = str(source_input)
             profile_timing = getattr(self.proc_obj, "profile_timing", [])
             if profile_timing:
                 top3 = sorted(profile_timing, key=lambda t: t[1], reverse=True)[:3]

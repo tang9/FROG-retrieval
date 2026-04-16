@@ -271,7 +271,7 @@ def find_index(L: FloatArrayLike, x: float) -> int:
     for i, t in enumerate(L):
         if x <= t:
             return i if (i == 0 or (L[i] - x) <= (x - L[i - 1])) else i - 1
-    return len(L)
+    return len(L)-1
 
 
 def gaussian_function(x: Any, area: float, cen: float, sig: float) -> Any:
@@ -284,11 +284,11 @@ def find_peak_fwhm(x: FloatArrayLike, y: FloatArrayLike) -> tuple[float, float, 
         if y[i_max] < y[i]:
             i_max = i
     y_fwhm = y[i_max] / 2
-    for i in range(0, i_max):
+    for i in range(0, i_max-1):
         if y[i] <= y_fwhm and y[i + 1] > y_fwhm:
             x_fwhm_1 = x[i] + (x[i + 1] - x[i]) * (y_fwhm - y[i]) / (y[i + 1] - y[i])
             break
-    for i in range(len(x) - 1, i_max, -1):
+    for i in range(len(x) - 2, i_max, -1):
         if y[i] >= y_fwhm and y[i + 1] < y_fwhm:
             x_fwhm_2 = x[i] + (x[i + 1] - x[i]) * (y_fwhm - y[i]) / (y[i + 1] - y[i])
             break
@@ -301,11 +301,11 @@ def find_peak_ratio(x: FloatArrayLike, y: FloatArrayLike, ratio) -> tuple[float,
         if y[i_max] < y[i]:
             i_max = i
     y_ratio = y[i_max] * ratio
-    for i in range(0, i_max):
+    for i in range(0, i_max-1):
         if y[i] <= y_ratio and y[i + 1] > y_ratio:
             x1 = x[i] + (x[i + 1] - x[i]) * (y_ratio - y[i]) / (y[i + 1] - y[i])
             break
-    for i in range(len(x) - 1, i_max, -1):
+    for i in range(len(x) - 2, i_max, -1):
         if y[i] >= y_ratio and y[i + 1] < y_ratio:
             x2 = x[i] + (x[i + 1] - x[i]) * (y_ratio - y[i]) / (y[i + 1] - y[i])
             break

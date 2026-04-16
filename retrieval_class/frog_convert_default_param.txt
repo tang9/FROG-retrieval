@@ -4,7 +4,7 @@
     1200.0
   ],
   "wavelength_bin": 1,
-  "noise_filter": "",
+  "noise_filter": "Low_pass",
   "sigma": 1.0,
   "cutoff": 10.0,
   "constant_bkg": 0.0,
@@ -12,11 +12,11 @@
   "delay_step": "fs",
   "delay_correction": 1.0,
   "edge": 5,
-  "subx": false,
+  "subx": true,
   "suby": false,
   "corner_suppression": false,
   "mask_frg": null,
-  "time_zero": false,
+  "time_zero": true,
   "time_range": null,
   "N": 256
 }
