@@ -18,11 +18,12 @@ writer: Tang, 2026-02
 import sys
 import os
 import json
+import re
 os.environ.setdefault("QT_API", "pyside6")
 import matplotlib
 matplotlib.use("QtAgg")
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.colors import LogNorm
 from matplotlib.figure import Figure
 from PySide6 import QtCore, QtWidgets
@@ -200,6 +201,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.raw_obj = None
         self.proc_obj = None
         self._raw_data_dict = None
+        self._raw_source = None
         self._cbars = {}
         self.last_dir = os.getcwd()
         self.one_d_dialog = None
@@ -224,6 +226,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.raw_obj = None
         self.proc_obj = None
         self._raw_data_dict = None
+        self._raw_source = None
         self.redraw()
         if hasattr(self, "one_d_dialog") and self.one_d_dialog is not None:
             self.one_d_dialog.clear_view()
@@ -342,6 +345,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.load_param_btn = QtWidgets.QPushButton("Load Param")
         self.save_param_btn = QtWidgets.QPushButton("Save Param")
         self.save_btn = QtWidgets.QPushButton("Save Convert")
+        self.save_auto_btn = QtWidgets.QPushButton("Save Autocorrelation")
         file_layout.addWidget(self.open_btn)
         file_layout.addWidget(self.reload_btn)
         self.open_btn.clicked.connect(self.open_file)
@@ -349,7 +353,8 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.process_btn.clicked.connect(self.process)
         self.load_param_btn.clicked.connect(self.load_params_file)
         self.save_param_btn.clicked.connect(self.save_params_file)
-        self.save_btn.clicked.connect(self.save_results)
+        self.save_btn.clicked.connect(self.save_results_dialog)
+        self.save_auto_btn.clicked.connect(self.save_autocorrelation_dialog)
 
         logs_layout = QtWidgets.QHBoxLayout()
         right_layout.addLayout(logs_layout)
@@ -362,6 +367,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         logs_layout.addWidget(self.save_param_btn)
         logs_layout.addWidget(self.process_btn)
         logs_layout.addWidget(self.save_btn)
+        logs_layout.addWidget(self.save_auto_btn)
         #logs_layout.addStretch(1)
         self.trace_log.toggled.connect(self.redraw)
         self.show_1d_btn.clicked.connect(self.show_1d_dialog)
@@ -372,7 +378,18 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.ax_frg = self.fig.add_subplot(223)
         self.ax_auto = self.fig.add_subplot(224)
         self.canvas = FigureCanvasQTAgg(self.fig)
-        right_layout.addWidget(self.canvas, 1)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self, coordinates=False)
+        self.toolbar.setOrientation(QtCore.Qt.Orientation.Vertical)
+        self.toolbar.setMovable(False)
+        self.toolbar.setFloatable(False)
+        self.toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+
+        figure_layout = QtWidgets.QHBoxLayout()
+        figure_layout.setContentsMargins(0, 0, 0, 0)
+        figure_layout.setSpacing(4)
+        figure_layout.addWidget(self.toolbar, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        figure_layout.addWidget(self.canvas, 1)
+        right_layout.addLayout(figure_layout, 1)
 
     def _read_range(self, enable_box: QtWidgets.QCheckBox, min_edit: QtWidgets.QLineEdit, max_edit: QtWidgets.QLineEdit):
         if not enable_box.isChecked():
@@ -546,19 +563,97 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         if os.path.isdir(folder):
             self.last_dir = folder
 
+    def _default_convert_save_prefix(self):
+        if self.proc_obj is not None and getattr(self.proc_obj, "prefix", ""):
+            prefix = str(self.proc_obj.prefix).strip()
+        else:
+            file_path = self.file_edit.text().strip()
+            if file_path:
+                prefix = os.path.splitext(os.path.abspath(file_path))[0]
+            else:
+                prefix = os.path.join(self.last_dir, "frog_convert")
+        source_dir = os.path.dirname(os.path.abspath(prefix))
+        retrieval_dir = os.path.join(source_dir, "retrieval_result")
+        save_prefix = os.path.join(retrieval_dir, os.path.basename(prefix))
+        return retrieval_dir, save_prefix
+
+    @staticmethod
+    def _strip_generated_suffixes(path):
+        value = os.path.abspath(str(path).strip())
+        patterns = (
+            r"_binned\d+\.frg$",
+            r"_processed_N\d+\.png$",
+            r"_processed_N\d+\.txt$",
+            r"_autocorrelation\.txt$",
+        )
+        for pattern in patterns:
+            next_value = re.sub(pattern, "", value, flags=re.IGNORECASE)
+            if next_value != value:
+                value = next_value
+                break
+        root, ext = os.path.splitext(value)
+        if ext.lower() in {".frg", ".png", ".txt"}:
+            value = root
+        return value.strip()
+
+    def _prompt_save_prefix(self, title, default_path, filter_text):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            title,
+            default_path,
+            filter_text,
+        )
+        if not path:
+            return None
+        prefix = self._strip_generated_suffixes(path)
+        if not prefix:
+            self._status_warn("Invalid save path.")
+            return None
+        save_dir = os.path.dirname(os.path.abspath(prefix))
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            self.last_dir = save_dir
+        return prefix
+
+    def _prompt_save_file(self, title, default_path, filter_text):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            title,
+            default_path,
+            filter_text,
+        )
+        if not path:
+            return None
+        out_path = os.path.abspath(str(path).strip())
+        if not out_path:
+            self._status_warn("Invalid save path.")
+            return None
+        if os.path.splitext(out_path)[1] == "":
+            out_path += ".txt"
+        save_dir = os.path.dirname(out_path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            self.last_dir = save_dir
+        return out_path
+
     def reload_raw(self):
-        """Reload raw data: re-read from file if path is valid, otherwise rebuild from in-memory dict."""
+        """Reload raw data using the current GUI parameters."""
+        self._reload_raw_with_current_params()
+
+    def _reload_raw_with_current_params(self) -> bool:
+        """Refresh raw_obj from the original source with the current parameters."""
         path = self.file_edit.text().strip()
         if path and os.path.isfile(path):
             self.load_raw()
-        elif self._raw_data_dict is not None:
+        elif self._raw_source is not None:
             self._reload_from_dict()
         else:
             self.load_raw()  # will show appropriate error
+        return self.raw_obj is not None and np.size(getattr(self.raw_obj, "frog_trace", [])) > 0
 
     def _reload_from_dict(self):
-        """Rebuild raw_obj from the stored _raw_data_dict."""
-        d = self._raw_data_dict
+        """Rebuild raw_obj from the original in-memory source."""
+        d = self._raw_source
         old_proc = self.proc_obj
         self.raw_obj = None
         self.proc_obj = None
@@ -608,6 +703,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                 time_range=p["time_range"],
                 raw=True,
             )
+            self._raw_source = os.path.abspath(path)
             raw_delay = np.asarray(getattr(self.raw_obj, "delay", []), dtype=float).ravel()
             raw_wave = np.asarray(getattr(self.raw_obj, "wavelength", []), dtype=float).ravel()
             raw_trace = np.asarray(getattr(self.raw_obj, "frog_trace", []), dtype=float)
@@ -647,6 +743,12 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         if trace.shape != (delay.size, wavelength.size):
             raise ValueError(f"Trace shape {trace.shape} vs delay {delay.size} x wavelength {wavelength.size}")
         self._reset_cached_state()
+        self._raw_source = {
+            "delay": delay.copy(),
+            "wavelength": wavelength.copy(),
+            "frog_trace": trace.copy(),
+            "prefix": "simulated",
+        }
         self._raw_data_dict = {
             "delay": delay.copy(),
             "wavelength": wavelength.copy(),
@@ -654,7 +756,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
             "prefix": "simulated",
         }
         self.raw_obj = FROG(
-            self._raw_data_dict,
+            self._raw_source,
             delay_step="fs",
             delay_correction=1.0,
             raw=True,
@@ -666,13 +768,17 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self._status_info("Loaded simulated FROG trace from Simulate tab.")
 
     def process(self):
-        if self._raw_data_dict is None:
+        if self._raw_source is None and self._raw_data_dict is None:
             self._status_warn("No raw data loaded: please Open or Reload first.")
             return
         try:
+            if not self._reload_raw_with_current_params():
+                self._status_warn("Run convert stopped: raw reload with current parameters failed.")
+                return
             p = self._collect_params()
+            source_input = self._raw_source if self._raw_source is not None else self._raw_data_dict
             self.proc_obj = FROG(
-                self._raw_data_dict,
+                source_input,
                 wavelength_range=p["wavelength_range"],
                 wavelength_bin=p["wavelength_bin"],
                 noise_filter=p["noise_filter"],
@@ -698,7 +804,10 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
             payload = self.export_retrieval_payload()
             if payload is not None:
                 self.retrieval_data_ready.emit(payload)
-            label = self._raw_data_dict.get("prefix", "frog")
+            if isinstance(source_input, dict):
+                label = source_input.get("prefix", "frog")
+            else:
+                label = str(source_input)
             profile_timing = getattr(self.proc_obj, "profile_timing", [])
             if profile_timing:
                 top3 = sorted(profile_timing, key=lambda t: t[1], reverse=True)[:3]
@@ -801,6 +910,31 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
 
+    def _get_autocorrelation_plot_data(self):
+        if self.proc_obj is None:
+            return None
+        delay = np.asarray(getattr(self.proc_obj, "delay", []), dtype=float)
+        auto = np.asarray(getattr(self.proc_obj, "autocorrelation", []), dtype=float)
+        if delay.ndim != 1 or auto.ndim != 1 or delay.size == 0 or auto.size == 0 or delay.size != auto.size:
+            return None
+
+        auto_norm = np.array(auto, copy=True)
+        max_auto = float(np.max(auto_norm))
+        if np.isfinite(max_auto) and max_auto > 0:
+            auto_norm /= max_auto
+
+        fit_y = None
+        fwhm = None
+        try:
+            param, _ = fit_peak(delay, auto_norm)
+            param = np.asarray(param, dtype=float)
+            if param.size == 3 and np.all(np.isfinite(param)) and abs(param[2]) > 0:
+                fit_y = gaussian_function(delay, param[0], param[1], param[2])
+                fwhm = float(param[2] * 2.35482)
+        except Exception:
+            pass
+        return delay, auto_norm, fit_y, fwhm
+
     def redraw(self):
         # Keep colorbar cleanup robust across frequent reload/process redraw calls.
         for _ax in (self.ax_raw, self.ax_frog, self.ax_frg):
@@ -859,27 +993,18 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                 self.trace_log.isChecked(),
                 log_vmin=max(mask_thr, 1e-4),
             )
-            auto = np.array(self.proc_obj.autocorrelation, dtype=float)
-            if auto.size > 0 and np.max(auto) > 0:
-                auto_norm = auto / np.max(auto)
-                self.ax_auto.plot(self.proc_obj.delay, auto_norm, ".-", lw=1, label="Autocorrelation")
-                try:
-                    param, _ = fit_peak(np.asarray(self.proc_obj.delay, dtype=float), auto_norm)
-                    param = np.asarray(param, dtype=float)
-                    if param.size == 3 and np.isfinite(param[2]) and abs(param[2]) > 0:
-                        fit_y = gaussian_function(np.asarray(self.proc_obj.delay, dtype=float), param[0], param[1], param[2])
-                        fwhm = param[2] * 2.35482
-                        self.ax_auto.plot(
-                            self.proc_obj.delay,
-                            fit_y,
-                            "-",
-                            lw=1.2,
-                            label=f"Gaussian fit (FWHM={fwhm:.1f} fs)",
-                        )
-                except Exception:
-                    pass
-            else:
-                self.ax_auto.plot(self.proc_obj.delay, auto, ".-", lw=1, label="Autocorrelation")
+            auto_data = self._get_autocorrelation_plot_data()
+            if auto_data is not None:
+                delay, auto_norm, fit_y, fwhm = auto_data
+                self.ax_auto.plot(delay, auto_norm, ".-", lw=1, label="Autocorrelation")
+                if fit_y is not None and fwhm is not None:
+                    self.ax_auto.plot(
+                        delay,
+                        fit_y,
+                        "-",
+                        lw=1.2,
+                        label=f"Gaussian fit (FWHM={fwhm:.1f} fs)",
+                    )
             self.ax_auto.set_title("Autocorrelation")
             self.ax_auto.set_xlabel("Delay (fs)")
             self.ax_auto.set_ylabel("Intensity")
@@ -898,28 +1023,93 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
             self._status_warn("No processed data: please click Process first.")
             return
         try:
-            prefix = self.proc_obj.prefix
-            source_dir = os.path.dirname(os.path.abspath(prefix))
-            retrieval_dir = os.path.join(source_dir, "retrieval_result")
-            os.makedirs(retrieval_dir, exist_ok=True)
-            save_prefix = os.path.join(retrieval_dir, os.path.basename(prefix))
-            N = self.proc_obj.frg_bin_size
-            fig_path = f"{save_prefix}_processed_N{N}.png"
-            param_path = f"{save_prefix}_processed_N{N}.txt"
-            self.fig.savefig(fig_path, dpi=200, bbox_inches="tight")
-            with open(param_path, "w", encoding="utf-8") as f:
-                json.dump(self._collect_params(), f, indent=2, ensure_ascii=True)
-            old_prefix = self.proc_obj.prefix
-            self.proc_obj.prefix = save_prefix
-            try:
-                self.proc_obj.output_binned()
-            finally:
-                self.proc_obj.prefix = old_prefix
-            self._status_info(
-                f"Saved to: {retrieval_dir} | Figure: {fig_path} | Params: {param_path} | Binned file exported."
-            )
+            retrieval_dir, save_prefix = self._default_convert_save_prefix()
+            self._save_results_to_prefix(retrieval_dir, save_prefix)
         except Exception as e:
             self._status_error(f"Save error: {e}")
+
+    def save_results_dialog(self):
+        if self.proc_obj is None or np.size(getattr(self.proc_obj, "frog_trace", [])) == 0:
+            self._status_warn("No processed data: please click Process first.")
+            return
+        try:
+            _, save_prefix = self._default_convert_save_prefix()
+            N = self.proc_obj.frg_bin_size
+            default_path = f"{save_prefix}_binned{N}.frg"
+            chosen_prefix = self._prompt_save_prefix(
+                "Save Convert",
+                default_path,
+                "FROG files (*.frg);;All files (*)",
+            )
+            if chosen_prefix is None:
+                return
+            retrieval_dir = os.path.dirname(os.path.abspath(chosen_prefix))
+            self._save_results_to_prefix(retrieval_dir, chosen_prefix)
+        except Exception as e:
+            self._status_error(f"Save error: {e}")
+
+    def _save_results_to_prefix(self, retrieval_dir, save_prefix):
+        os.makedirs(retrieval_dir, exist_ok=True)
+        N = self.proc_obj.frg_bin_size
+        fig_path = f"{save_prefix}_processed_N{N}.png"
+        param_path = f"{save_prefix}_processed_N{N}.txt"
+        self.fig.savefig(fig_path, dpi=200, bbox_inches="tight")
+        with open(param_path, "w", encoding="utf-8") as f:
+            json.dump(self._collect_params(), f, indent=2, ensure_ascii=True)
+        old_prefix = self.proc_obj.prefix
+        self.proc_obj.prefix = save_prefix
+        try:
+            self.proc_obj.output_binned()
+        finally:
+            self.proc_obj.prefix = old_prefix
+        self._status_info(
+            f"Saved to: {retrieval_dir} | Figure: {fig_path} | Params: {param_path} | Binned file exported."
+        )
+
+    def save_autocorrelation(self):
+        auto_data = self._get_autocorrelation_plot_data()
+        if auto_data is None:
+            self._status_warn("No autocorrelation data: please click Process first.")
+            return
+        try:
+            delay, auto_norm, fit_y, _ = auto_data
+            _, save_prefix = self._default_convert_save_prefix()
+            auto_path = f"{save_prefix}_autocorrelation.txt"
+            self._save_autocorrelation_to_path(auto_path, delay, auto_norm, fit_y)
+        except Exception as e:
+            self._status_error(f"Save autocorrelation error: {e}")
+
+    def save_autocorrelation_dialog(self):
+        auto_data = self._get_autocorrelation_plot_data()
+        if auto_data is None:
+            self._status_warn("No autocorrelation data: please click Process first.")
+            return
+        try:
+            delay, auto_norm, fit_y, _ = auto_data
+            _, save_prefix = self._default_convert_save_prefix()
+            default_path = f"{save_prefix}_autocorrelation.txt"
+            auto_path = self._prompt_save_file(
+                "Save Autocorrelation",
+                default_path,
+                "Text files (*.txt);;All files (*)",
+            )
+            if auto_path is None:
+                return
+            self._save_autocorrelation_to_path(auto_path, delay, auto_norm, fit_y)
+        except Exception as e:
+            self._status_error(f"Save autocorrelation error: {e}")
+
+    def _save_autocorrelation_to_path(self, auto_path, delay, auto_norm, fit_y):
+        fit_col = fit_y if fit_y is not None else np.full(delay.shape, np.nan, dtype=float)
+        data = np.column_stack((delay, auto_norm, fit_col))
+        np.savetxt(
+            auto_path,
+            data,
+            delimiter="\t",
+            header="delay_fs\tautocorrelation_normalized\tgaussian_fit_normalized",
+            comments="",
+        )
+        self._status_info(f"Saved autocorrelation: {auto_path}")
 
 
 def main():

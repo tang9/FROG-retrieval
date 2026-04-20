@@ -171,6 +171,7 @@ Intensity is normalized to a peak value of 1, and phase is the unwrapped retriev
 | `prefix_binnedN.frg` | Square, normalized retrieval input trace (`N x N`) in frequency-delay coordinates |
 | `prefix_processed_N{N}.png` | Snapshot of the processed Convert-tab figure |
 | `prefix_processed_N{N}.txt` | JSON parameter dump for the current Convert-tab settings |
+| `prefix_autocorrelation_N{N}.txt` | Delay-axis autocorrelation export with normalized trace and Gaussian-fit columns |
 
 The converter also writes this auxiliary text export:
 

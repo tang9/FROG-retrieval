@@ -1,25 +1,22 @@
 {
   "wavelength_range": [
-    1055.0,
+    200.0,
     1200.0
   ],
   "wavelength_bin": 1,
   "noise_filter": "Low_pass",
   "sigma": 1.0,
-  "cutoff": 6.0,
+  "cutoff": 10.0,
   "constant_bkg": 0.0,
-  "filter_axis": "wavelength",
+  "filter_axis": "both",
   "delay_step": "fs",
   "delay_correction": 1.0,
-  "edge": 20,
+  "edge": 5,
   "subx": true,
   "suby": false,
-  "corner_suppression": true,
-  "mask_frg": 0.001,
+  "corner_suppression": false,
+  "mask_frg": null,
   "time_zero": true,
-  "time_range": [
-    -1800.0,
-    1800.0
-  ],
+  "time_range": null,
   "N": 256
 }
