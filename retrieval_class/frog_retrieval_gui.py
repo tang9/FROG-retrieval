@@ -1125,9 +1125,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
         sigma_text = f", sigma={result_obj.best_sigma:.4g}" if np.isfinite(result_obj.best_sigma) else ""
         elapsed_text = f"{elapsed_s:.2f}" if np.isfinite(elapsed_s) else "nan"
         algo_tag = self._active_algorithm if self._active_algorithm else self.combo_algo.currentText().strip().upper()
-        best_iter = int(result_obj.best_iteration)
-        errors_count = int(np.asarray(getattr(result_obj, "errors", []), dtype=np.float64).size)
-        report_iter = int(max(best_iter, errors_count, self._last_progress_iter))
+        report_iter = int(self._last_progress_iter)
         g_display = float(self._last_progress_g)
         if stopped_by_user:
             self._set_status(
