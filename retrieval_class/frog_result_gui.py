@@ -42,6 +42,53 @@ def _open_dialog_dir(path: str) -> str:
             return folder
         probe = parent
 
+def import_data_1d(
+    filename: str,
+    have_title: bool = False
+):
+    """Read 1D tabular data and return x, y arrays (and optional titles)."""
+    with open(filename, "r") as f:
+        lines = f.readlines()
+   # Skip title/comments until first numeric row.
+    start_idx = None
+    for i_line, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            [float(x) for x in line.replace(",", " ").split()]
+            start_idx = i_line
+            break
+        except Exception:
+            continue
+    if start_idx is None or (len(lines) - start_idx) < 2:
+        raise ValueError(f"No data found in file: {filename}")
+    if have_title:
+        titles = lines[start_idx-1].replace(",", " ").split()
+    lines = lines[start_idx:]
+    test = lines[0].replace(",", " ").split()
+    N_y = len(test) - 1
+    x = []
+    y = [[] for _ in range(N_y)]
+    iline = 0
+    while iline < len(lines):
+        if not lines[iline].strip():
+            iline += 1
+            continue
+        try:
+            l = lines[iline].replace(",", " ").split()
+            x.append(float(l[0]))
+            for iP in range(N_y):
+                y[iP].append(float(l[iP + 1]))
+            iline += 1
+        except Exception:
+            iline += 1
+            continue
+    if have_title:
+        return np.array(x), np.array(y), titles
+    return np.array(x), np.array(y)
+
+
 class FrequencyAnalysisDialog(QtWidgets.QDialog):
     def __init__(self, result_obj, parent=None, status_sink=None):
         super().__init__(parent)
@@ -1027,17 +1074,20 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        self._update_last_dir(path)
-        self.raw_spectra_edit.setText(path)
         try:
-            arr = np.loadtxt(path, dtype=float)
-            if arr.ndim == 1 or arr.shape[1] < 2:
+            x, ys = import_data_1d(path)
+            if len(ys) < 1 or len(ys[0]) < 1:
                 raise ValueError("Raw spectra file must contain at least 2 columns.")
-            self.measured_wave = np.asarray(arr[:, 0], dtype=float)
-            self.measured_intensity = np.asarray(arr[:, 1], dtype=float)
+            self.measured_wave = np.asarray(x, dtype=float)
+            self.measured_intensity = np.asarray(ys[0], dtype=float)
+            self._update_last_dir(path)
+            self.raw_spectra_edit.setText(path)
             self.redraw()
             self._show_status(f"Loaded raw spectra: {path}", error=False)
         except Exception as e:
+            self.measured_wave = None
+            self.measured_intensity = None
+            self.redraw()
             self._show_status(f"Open spectra error: {e}", error=True)
 
     def save_figure(self):
@@ -1153,6 +1203,29 @@ class FrogResultGUI(QtWidgets.QMainWindow):
             self.ax_rec.set_title("Reconstructed")
             self.ax_time.set_title("Time profile")
             self.ax_spec.set_title("Spectra")
+            self.ax_spec.set_xlabel("Wavelength (nm)")
+            self.ax_spec.set_ylabel("Intensity")
+            self.ax_spec.set_ylim(0, 1.4)
+            self.ax_spec.grid(True, alpha=0.3)
+            try:
+                if self.measured_wave is not None and self.measured_intensity is not None:
+                    if self.raw_shift.text().strip():
+                        try:
+                            shift_val = float(self.raw_shift.text().strip())
+                            wave = self.measured_wave + shift_val
+                        except ValueError:
+                            wave = np.asarray(self.measured_wave, dtype=float)
+                    else:
+                        wave = np.asarray(self.measured_wave, dtype=float)
+                    measured = np.asarray(self.measured_intensity, dtype=float)
+                    vmax = np.max(measured) if measured.size > 0 else 0.0
+                    if vmax > 0:
+                        measured = measured / vmax
+                    self.ax_spec.plot(wave, measured, "--", lw=2, label="Measured", color="tab:green")
+                    self.ax_spec.legend()
+                    self.ax_spec.autoscale(enable=True, axis="x")
+            except Exception as e:
+                self._show_status(f"Measured spectra plot error: {e}", error=True)
             self.fig.tight_layout()
             self.canvas.draw_idle()
             return
