@@ -128,7 +128,7 @@ def _read_frg_file(path: str) -> FrgData:
         wavelength_nm = np.clip(wavelength_nm, 1e-12, None)
         frequency = SPEED_LIGHT / (wavelength_nm * 1e-9) / 1e15
         trace = np.nan_to_num(trace, nan=0.0, posinf=0.0, neginf=0.0)
-        trace = np.clip(trace, 0.0, None).T
+        trace = np.clip(trace, 0.0, None)
         max_trace = float(np.max(trace))
         if max_trace > 1e-15:
             trace /= max_trace
