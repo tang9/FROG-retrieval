@@ -37,7 +37,7 @@ class FrogPipelineGUI(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("FROG Unified GUI")
-        self._initial_width = 1200
+        self._initial_width = 1000
         self._initial_height = 800
         self._initial_size_applied = False
         self.resize(self._initial_width, self._initial_height)
@@ -86,25 +86,25 @@ class FrogPipelineGUI(QtWidgets.QMainWindow):
         self.btn_send_simulate = QtWidgets.QPushButton("Simulate -> Convert")
         self.btn_send_convert = QtWidgets.QPushButton("Convert -> Retrieval")
         self.btn_send_result = QtWidgets.QPushButton("Retrieval -> Result")
-        self.btn_convert_retrieval = QtWidgets.QPushButton("Convert + Retrieval")
+        self.btn_convert_retrieval = QtWidgets.QPushButton("Convert+Retrieval")
         self.btn_save_all = QtWidgets.QPushButton("Save All")
         self.btn_run_all = QtWidgets.QPushButton("Run All")
         self.btn_convert_retrieval.setToolTip("Run Convert, then start Retrieval.")
         self.btn_run_all.setToolTip("Run Convert and Retrieval, then Save All.")
-        self.chk_auto_convert = QtWidgets.QCheckBox("Auto Convert->Retrieval")
-        self.chk_auto_result = QtWidgets.QCheckBox("Auto Retrieval->Result")
+        self.chk_auto_convert = QtWidgets.QCheckBox("Auto")
+        self.chk_auto_result = QtWidgets.QCheckBox("Auto")
         self.chk_auto_convert.setChecked(True)
         self.chk_auto_result.setChecked(True)
 
         row.addWidget(self.btn_send_simulate)
         row.addWidget(self.btn_send_convert)
-        row.addWidget(self.btn_send_result)
         row.addWidget(self.chk_auto_convert)
+        row.addWidget(self.btn_send_result)
         row.addWidget(self.chk_auto_result)
         row.addSpacing(8)
         self.pipeline_status_label = QtWidgets.QLabel("Ready.")
         self.pipeline_status_label.setStyleSheet("color:#404040;")
-        self.pipeline_status_label.setMinimumWidth(320)
+        self.pipeline_status_label.setMinimumWidth(260)
         self.pipeline_status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.pipeline_status_label)
         row.addStretch(1)

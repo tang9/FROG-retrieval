@@ -4,9 +4,9 @@
     1200.0
   ],
   "wavelength_bin": 1,
-  "noise_filter": "Low_pass",
+  "noise_filter": "",
   "sigma": 1.0,
-  "lowpass_delay_scale": 30.0,
+  "lowpass_delay_scale": 20.0,
   "lowpass_wavelength_scale": 5.0,
   "constant_bkg": 0.0,
   "filter_axis": "both",

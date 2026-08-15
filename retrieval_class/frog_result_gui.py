@@ -8,13 +8,13 @@ os.environ.setdefault("QT_API", "pyside6")
 import matplotlib
 matplotlib.use("QtAgg")
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.colors import LogNorm, Normalize
 from PySide6 import QtWidgets, QtCore
 
 from .frog_result import FROG_result
-from .common import custom_cmap, find_peak_fwhm
+from .common import custom_cmap, find_peak_fwhm, find_peak_ratio
 from .output_paths import build_retrieval_save_prefix
 
 C_LIGHT = 299792458.0
@@ -91,42 +91,64 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
         parent=None,
         status_sink=None,
         time_limits_provider=None,
+        time_intensity_log_provider=None,
+        freq_intensity_log_provider=None,
     ):
         super().__init__(parent)
         self.result_obj = result_obj
         self._material_module_cache = {}
         self._status_sink = status_sink
         self._time_limits_provider = time_limits_provider
+        self._time_intensity_log_provider = time_intensity_log_provider
+        self._freq_intensity_log_provider = freq_intensity_log_provider
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
+
         ctrl = QtWidgets.QHBoxLayout()
         layout.addLayout(ctrl)
+        ctrl.addWidget(QtWidgets.QLabel("Fit order"))
+        self.fit_order_edit = QtWidgets.QLineEdit("3")
+        self.fit_order_edit.setMaximumWidth(80)
+        ctrl.addWidget(self.fit_order_edit)
         ctrl.addWidget(QtWidgets.QLabel("freq min (PHz)"))
         self.freq_min_edit = QtWidgets.QLineEdit("")
         ctrl.addWidget(self.freq_min_edit)
         ctrl.addWidget(QtWidgets.QLabel("freq max (PHz)"))
         self.freq_max_edit = QtWidgets.QLineEdit("")
         ctrl.addWidget(self.freq_max_edit)
-        ctrl.addWidget(QtWidgets.QLabel("add_GDD (fs^2)"))
-        self.add_gdd_edit = QtWidgets.QLineEdit("0")
-        ctrl.addWidget(self.add_gdd_edit)
-        ctrl.addWidget(QtWidgets.QLabel("add_TOD (fs^3)"))
-        self.add_tod_edit = QtWidgets.QLineEdit("0")
-        ctrl.addWidget(self.add_tod_edit)
-        self.update_btn = QtWidgets.QPushButton("Update")
-        self.save_btn = QtWidgets.QPushButton("Save")
-        ctrl.addWidget(self.update_btn)
-        ctrl.addWidget(self.save_btn)
         ctrl.addStretch(1)
+
+        fit_result_row = QtWidgets.QHBoxLayout()
+        layout.addLayout(fit_result_row)
+        self.fit_result_label = QtWidgets.QLabel("Fit result: --")
+        self.fit_result_label.setStyleSheet("color: #404040;")
+        fit_result_row.addWidget(self.fit_result_label)
+        fit_result_row.addStretch(1)
+
+        layout.addSpacing(10)
+
+        chirp_row = QtWidgets.QHBoxLayout()
+        layout.addLayout(chirp_row)
+        chirp_row.addWidget(QtWidgets.QLabel("add_GDD (fs^2)"))
+        self.add_gdd_edit = QtWidgets.QLineEdit("0")
+        chirp_row.addWidget(self.add_gdd_edit)
+        chirp_row.addWidget(QtWidgets.QLabel("add_TOD (fs^3)"))
+        self.add_tod_edit = QtWidgets.QLineEdit("0")
+        chirp_row.addWidget(self.add_tod_edit)
+        chirp_row.addWidget(QtWidgets.QLabel("add_FOD (fs^4)"))
+        self.add_fod_edit = QtWidgets.QLineEdit("0")
+        chirp_row.addWidget(self.add_fod_edit)
+        chirp_row.addWidget(QtWidgets.QLabel("add_5OD (fs^5)"))
+        self.add_5od_edit = QtWidgets.QLineEdit("0")
+        chirp_row.addWidget(self.add_5od_edit)
+        chirp_row.addStretch(1)
+
+        layout.addSpacing(10)
 
         mat_row = QtWidgets.QHBoxLayout()
         layout.addLayout(mat_row)
-        mat_row.addWidget(QtWidgets.QLabel("Fit order"))
-        self.fit_order_edit = QtWidgets.QLineEdit("3")
-        self.fit_order_edit.setMaximumWidth(80)
-        mat_row.addWidget(self.fit_order_edit)
         mat_row.addWidget(QtWidgets.QLabel("Material"))
         self.material_combo = QtWidgets.QComboBox()
         self.material_combo.addItem("None")
@@ -139,10 +161,14 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
         self.material_thickness_edit = QtWidgets.QLineEdit("0")
         self.material_thickness_edit.setMaximumWidth(120)
         mat_row.addWidget(self.material_thickness_edit)
+        mat_row.addStretch(1)
+        
+        mat_row2 = QtWidgets.QHBoxLayout()
+        layout.addLayout(mat_row2)
         self.material_disp_label = QtWidgets.QLabel("Material GDD/TOD: --")
         self.material_disp_label.setStyleSheet("color: #404040;")
-        mat_row.addWidget(self.material_disp_label)
-        mat_row.addStretch(1)
+        mat_row2.addWidget(self.material_disp_label)
+        mat_row2.addStretch(1)
 
         self.fig = Figure(figsize=(12, 5.5), dpi=90)
         self.freq_ax = self.fig.add_subplot(121)
@@ -153,14 +179,16 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
         )
         self.time_ax = self.fig.add_subplot(122)
         self.canvas = FigureCanvasQTAgg(self.fig)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, 1)
 
-        self.update_btn.clicked.connect(self.redraw)
-        self.save_btn.clicked.connect(self.save_phase_analysis)
         self.freq_min_edit.editingFinished.connect(self.redraw)
         self.freq_max_edit.editingFinished.connect(self.redraw)
         self.add_gdd_edit.editingFinished.connect(self.redraw)
         self.add_tod_edit.editingFinished.connect(self.redraw)
+        self.add_fod_edit.editingFinished.connect(self.redraw)
+        self.add_5od_edit.editingFinished.connect(self.redraw)
         self.fit_order_edit.editingFinished.connect(self.redraw)
         self.material_combo.currentTextChanged.connect(self.redraw)
         self.material_thickness_edit.editingFinished.connect(self.redraw)
@@ -234,6 +262,20 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
             self._notify("Invalid input: material thickness must be numeric.", error=True)
             return None, 0.0
         return material, thickness_mm
+
+    _DISP_ORDER_NAMES = {2: "GDD", 3: "TOD", 4: "FOD", 5: "5OD"}
+    _DISP_ORDER_UNITS = {2: "fs²", 3: "fs³", 4: "fs⁴", 5: "fs⁵"}
+
+    @classmethod
+    def _format_disp_orders(cls, disp_orders: dict) -> str:
+        if not disp_orders:
+            return "--"
+        parts = []
+        for order in sorted(disp_orders):
+            name = cls._DISP_ORDER_NAMES.get(order, f"{order}OD")
+            unit = cls._DISP_ORDER_UNITS.get(order, f"fs^{order}")
+            parts.append(f"{name}={disp_orders[order]:.0f} {unit}")
+        return ", ".join(parts)
 
     @staticmethod
     def _extract_gdd_tod_from_phase(x_rad_per_s, phase_rad):
@@ -380,30 +422,24 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
     def _parse_dispersion_add(self):
         gdd_text = self.add_gdd_edit.text().strip()
         tod_text = self.add_tod_edit.text().strip()
+        fod_text = self.add_fod_edit.text().strip()
+        od5_text = self.add_5od_edit.text().strip()
         try:
             add_gdd = float(gdd_text) if gdd_text else 0.0
             add_tod = float(tod_text) if tod_text else 0.0
+            add_fod = float(fod_text) if fod_text else 0.0
+            add_5od = float(od5_text) if od5_text else 0.0
         except ValueError:
-            self._notify("Invalid input: GDD/TOD values must be numeric.", error=True)
-            return 0.0, 0.0
-        return add_gdd, add_tod
-
-    def save_phase_analysis(self):
-        if self.result_obj is None:
-            self._notify("No data: please load a result first.", error=True)
-            return
-        try:
-            retrieval_dir, save_prefix = _build_retrieval_save_prefix(self.result_obj.prefix)
-            out_path = f"{save_prefix}_phase_analysis.png"
-            self.fig.savefig(out_path, dpi=200, bbox_inches="tight")
-            self._notify(f"Saved to: {retrieval_dir} | Phase analysis: {out_path}", error=False)
-        except Exception as e:
-            self._notify(f"Save error: {e}", error=True)
+            self._notify("Invalid input: GDD/TOD/FOD/5OD values must be numeric.", error=True)
+            return 0.0, 0.0, 0.0, 0.0
+        return add_gdd, add_tod, add_fod, add_5od
 
     def redraw(self):
         self.freq_ax.clear()
         self.intensity_ax.clear()
         self.time_ax.clear()
+        freq_intensity_log = bool(self._freq_intensity_log_provider()) if callable(self._freq_intensity_log_provider) else False
+        time_intensity_log = bool(self._time_intensity_log_provider()) if callable(self._time_intensity_log_provider) else False
         self.freq_ax.set_xlabel("Frequency (PHz)")
         self.freq_ax.set_ylabel("Phase (rad)")
         self.intensity_ax.set_ylabel("Intensity")
@@ -411,11 +447,21 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
         self.intensity_ax.yaxis.tick_right()
         self.intensity_ax.spines["right"].set_visible(True)
         self.intensity_ax.spines["left"].set_visible(False)
-        self.intensity_ax.set_ylim(0.0, 1.4)
         self.angular_freq_ax.set_xlabel("Angular frequency (rad/fs)")
         self.time_ax.set_xlabel("Time (fs)")
         self.time_ax.set_ylabel("Intensity")
-        self.time_ax.set_ylim(0.0, 1.4)
+        if freq_intensity_log:
+            self.intensity_ax.set_yscale("log")
+            self.intensity_ax.set_ylim(1e-4, 2.0)
+        else:
+            self.intensity_ax.set_yscale("linear")
+            self.intensity_ax.set_ylim(0.0, 1.4)
+        if time_intensity_log:
+            self.time_ax.set_yscale("log")
+            self.time_ax.set_ylim(1e-4, 2.0)
+        else:
+            self.time_ax.set_yscale("linear")
+            self.time_ax.set_ylim(0.0, 1.4)
         self.freq_ax.grid(True, alpha=0.25)
         self.time_ax.grid(True, alpha=0.25)
 
@@ -431,9 +477,10 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
             fit_order = self._parse_fit_order()
             if fit_order is None:
                 return
-            add_gdd, add_tod = self._parse_dispersion_add()
+            add_gdd, add_tod, add_fod, add_5od = self._parse_dispersion_add()
             material, thickness_mm = self._parse_material_addition()
             res = self.result_obj.get_GDD_TOD(freq_min=fmin, freq_max=fmax, fit_order=fit_order)
+            self.fit_result_label.setText("Fit result: " + self._format_disp_orders(res.get("disp_orders", {})))
 
             freq = np.asarray(self.result_obj.freq, dtype=float)
             phase = np.asarray(self.result_obj.freq_phase, dtype=float)
@@ -444,7 +491,13 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
             freq_fit = angular_freq_fit / (2 * np.pi)
             freq0 = angular_freq0 / (2 * np.pi)
             angular_freq = freq * 2 * np.pi
-            add_phase = add_gdd / 2 * (angular_freq - angular_freq0) ** 2 + add_tod / 6 * (angular_freq - angular_freq0) ** 3
+            d_omega = angular_freq - angular_freq0
+            add_phase = (
+                add_gdd / 2 * d_omega ** 2
+                + add_tod / 6 * d_omega ** 3
+                + add_fod / 24 * d_omega ** 4
+                + add_5od / 120 * d_omega ** 5
+            )
             add_phase_material, mat_gdd, mat_tod = self._material_phase_add(freq, angular_freq0, material, thickness_mm)
             phase_comp = phase + add_phase + add_phase_material
             # Set compensated phase reference: phase(angular_freq0) = 0.
@@ -501,28 +554,39 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
                 color="0.4",
                 linewidth=1.4,
                 linestyle="--",
-                label=f"ω₀={angular_freq0:.3f} rad/fs",
+                label=f"f0={angular_freq0/2/np.pi:.4f} PHz",
             )
 
-            if freq_fit.size > 1:
-                fit_min = float(np.min(freq_fit))
-                fit_max = float(np.max(freq_fit))
-                fit_center = 0.5 * (fit_min + fit_max)
-                fit_half = 0.5 * (fit_max - fit_min)
-                self.freq_ax.set_xlim(fit_center - 3 * fit_half, fit_center + 3 * fit_half)
+            _, _, ang_x1, ang_x2 = find_peak_ratio(angular_freq, intensity, 0.01)
+            range_center = 0.5 * (ang_x1 + ang_x2) / (2 * np.pi)
+            range_half = 0.5 * (ang_x2 - ang_x1) / (2 * np.pi)
+            if range_half > 0:
+                self.freq_ax.set_xlim(range_center - 3 * range_half, range_center + 3 * range_half)
             else:
                 self.freq_ax.set_xlim(float(np.min(freq)), float(np.max(freq)))
 
-            self.freq_ax.set_ylim(-np.pi, np.pi)
-            self.intensity_ax.set_ylim(0.0, 1.4)
+            mask = np.isfinite(phase) & np.isfinite(phase_comp)
+            if intensity.size == phase.size and intensity.size > 0:
+                peak = np.max(intensity)
+                if peak > 0:
+                    mask &= intensity >= 1e-3 * peak
+            if np.any(mask):
+                phase_min = float(np.floor(min(np.min(phase[mask]), np.min(phase_comp[mask]))))
+                phase_max = float(np.ceil(max(np.max(phase[mask]), np.max(phase_comp[mask]))))
+                if phase_min >= phase_max:
+                    phase_min -= 1.0
+                    phase_max += 1.0
+            else:
+                phase_min, phase_max = -np.pi, np.pi
+            self.freq_ax.set_ylim(phase_min, phase_max)
             self.freq_ax.set_title(
-                f"GDD={res['GDD']:.0f} fs², TOD={res['TOD']:.0f} fs³",
+                f"GDD={res['GDD']:.0f} fs^2, TOD={res['TOD']:.0f} fs^3",
                 color="tab:blue", fontsize=10,
             )
             self.freq_ax.legend(
                 [phase_line, compensated_line, fit_line, center_line, intensity_line],
                 ["Retrieved phase", "Compensated phase", "Polynomial fit", center_line.get_label(), "Intensity"],
-                loc="best",
+                loc="upper left",
                 fontsize=10,
             )
 
@@ -542,21 +606,21 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
                 raw_time,
                 raw_intensity,
                 color="0.5",
-                linewidth=2.0,
+                linewidth=1.6,
                 label=f"Original FWHM={fwhm_raw:.1f} fs",
             )
             self.time_ax.plot(
                 new_time,
                 new_intensity,
                 color="tab:red",
-                linewidth=2.4,
+                linewidth=1.6,
                 label=f"Compensated FWHM={fwhm_new:.1f} fs",
             )
             self.time_ax.plot(
                 ftl_time,
                 ftl_intensity,
                 color="tab:blue",
-                linewidth=2.2,
+                linewidth=1.6,
                 linestyle="--",
                 label=f"FTL FWHM={fwhm_ftl:.1f} fs",
             )
@@ -573,13 +637,15 @@ class FrequencyAnalysisWidget(QtWidgets.QWidget):
                 self.time_ax.set_xlim(time_min, time_max)
             else:
                 self.time_ax.set_xlim(-3.5 * pulse0, 2.5 * pulse0)
-            self.time_ax.set_ylim(0.0, 1.4)
             self.time_ax.legend(fontsize=10)
             mat_text = f", material={material} {thickness_mm:.4g} mm" if material is not None and abs(thickness_mm) > 0 else ""
             self.time_ax.set_title(
-                f"add_GDD={add_gdd:.0f} fs², add_TOD={add_tod:.0f} fs³{mat_text}",fontsize=10
+                f"add_GDD={add_gdd:.0f} fs^2, add_TOD={add_tod:.0f} fs^3,\n"
+                f"add_FOD={add_fod:.0f} fs^4, add_5OD={add_5od:.0f} fs^5.\n{mat_text}",
+                fontsize=9,
             )
         except Exception as e:
+            self.fit_result_label.setText("Fit result: error")
             self.material_disp_label.setText("Material GDD/TOD: error")
             self.freq_ax.set_title(f"Frequency analysis error: {e}")
             self.time_ax.set_title(f"Compensation plot error: {e}")
@@ -638,26 +704,35 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         left_layout.addWidget(params_box)
 
         self.delay_min = QtWidgets.QLineEdit("")
-        params_form.addRow("delay_min", self.delay_min)
+        params_form.addRow("delay min", self.delay_min)
         self.delay_max = QtWidgets.QLineEdit("")
-        params_form.addRow("delay_max", self.delay_max)
+        params_form.addRow("delay max", self.delay_max)
         self.freq_min = QtWidgets.QLineEdit("")
-        params_form.addRow("freq_min", self.freq_min)
+        params_form.addRow("freq min", self.freq_min)
         self.freq_max = QtWidgets.QLineEdit("")
-        params_form.addRow("freq_max", self.freq_max)
+        params_form.addRow("freq max", self.freq_max)
         self.time_min = QtWidgets.QLineEdit("")
-        params_form.addRow("time_min", self.time_min)
+        params_form.addRow("time min", self.time_min)
         self.time_max = QtWidgets.QLineEdit("")
-        params_form.addRow("time_max", self.time_max)
+        params_form.addRow("time max", self.time_max)
         self.wave_min = QtWidgets.QLineEdit("")
-        params_form.addRow("wavelength_min", self.wave_min)
+        params_form.addRow("wavelength min", self.wave_min)
         self.wave_max = QtWidgets.QLineEdit("")
-        params_form.addRow("wavelength_max", self.wave_max)
+        params_form.addRow("wavelength max", self.wave_max)
         self.raw_shift = QtWidgets.QLineEdit("")
-        params_form.addRow("raw_shift", self.raw_shift)
+        params_form.addRow("raw shift", self.raw_shift)
         self.trace_log = QtWidgets.QCheckBox("Trace log scale")
         self.trace_log.setChecked(False)
         params_form.addRow(self.trace_log)
+        self.time_intensity_log = QtWidgets.QCheckBox("Time intensity log")
+        self.time_intensity_log.setChecked(False)
+        params_form.addRow(self.time_intensity_log)
+        self.freq_intensity_log = QtWidgets.QCheckBox("Freq intensity log")
+        self.freq_intensity_log.setChecked(False)
+        params_form.addRow(self.freq_intensity_log)
+        self.wavelength_intensity_log = QtWidgets.QCheckBox("Wavelength intensity log")
+        self.wavelength_intensity_log.setChecked(False)
+        params_form.addRow(self.wavelength_intensity_log)
         self.time_reverse_btn = QtWidgets.QCheckBox("Time Reverse")
         self.time_reverse_btn.setChecked(False)
         params_form.addRow(self.time_reverse_btn)
@@ -681,7 +756,7 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         row1.addWidget(self.prefix_edit, 1)
         self.open_btn = QtWidgets.QPushButton("Open")
         self.load_btn = QtWidgets.QPushButton("Load")
-        self.save_btn = QtWidgets.QPushButton("Save")
+        self.save_btn = QtWidgets.QPushButton("Save Result")
         row1.addWidget(self.open_btn)
         row1.addWidget(self.load_btn)
         row1.addWidget(self.save_btn)
@@ -717,6 +792,8 @@ class FrogResultGUI(QtWidgets.QMainWindow):
             self,
             status_sink=self._show_status,
             time_limits_provider=self._phase_analysis_time_limits,
+            time_intensity_log_provider=lambda: self.time_intensity_log.isChecked(),
+            freq_intensity_log_provider=lambda: self.freq_intensity_log.isChecked(),
         )
         self.result_tabs.addTab(self.phase_analysis_widget, "Phase Analysis")
 
@@ -725,6 +802,9 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.save_btn.clicked.connect(self.save_figure)
         self.open_spectra_btn.clicked.connect(self.open_raw_spectra)
         self.trace_log.toggled.connect(self.redraw)
+        self.time_intensity_log.toggled.connect(self._on_intensity_log_toggled)
+        self.freq_intensity_log.toggled.connect(self._on_intensity_log_toggled)
+        self.wavelength_intensity_log.toggled.connect(self._on_intensity_log_toggled)
         self.time_reverse_btn.toggled.connect(self._on_time_reverse_toggled)
         self.result_tabs.currentChanged.connect(self._on_result_tab_changed)
         self.time_min.editingFinished.connect(self._on_time_limits_changed)
@@ -1052,6 +1132,10 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.redraw()
         self._sync_phase_analysis_tab(redraw=True)
 
+    def _on_intensity_log_toggled(self, _checked: bool):
+        self.redraw()
+        self._sync_phase_analysis_tab(redraw=True)
+
     def _phase_analysis_time_limits(self):
         time_min_text = self.time_min.text().strip()
         time_max_text = self.time_max.text().strip()
@@ -1111,7 +1195,12 @@ class FrogResultGUI(QtWidgets.QMainWindow):
             retrieval_dir, save_prefix = _build_retrieval_save_prefix(prefix)
             out_path = f"{save_prefix}_retrieval_result.png"
             self.fig.savefig(out_path, dpi=200, bbox_inches="tight")
-            self._show_status(f"Saved to: {retrieval_dir} | Retrieval figure: {out_path}", error=False)
+            phase_out_path = f"{save_prefix}_phase_analysis.png"
+            self.phase_analysis_widget.fig.savefig(phase_out_path, dpi=200, bbox_inches="tight")
+            self._show_status(
+                f"Saved to: {retrieval_dir} | Retrieval figure: {out_path} | Phase analysis: {phase_out_path}",
+                error=False,
+            )
         except Exception as e:
             self._show_status(f"Save error: {e}", error=True)
 
@@ -1190,7 +1279,12 @@ class FrogResultGUI(QtWidgets.QMainWindow):
             self.ax_spec.set_title("Spectra")
             self.ax_spec.set_xlabel("Wavelength (nm)")
             self.ax_spec.set_ylabel("Intensity")
-            self.ax_spec.set_ylim(0, 1.4)
+            if self.wavelength_intensity_log.isChecked():
+                self.ax_spec.set_yscale("log")
+                self.ax_spec.set_ylim(1e-4, 2.0)
+            else:
+                self.ax_spec.set_yscale("linear")
+                self.ax_spec.set_ylim(0, 1.4)
             self.ax_spec.grid(True, alpha=0.3)
             try:
                 if self.measured_wave is not None and self.measured_intensity is not None:
@@ -1218,6 +1312,8 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         r = self.result_obj
         display_errors = []
         trace_norm = LogNorm(vmin=2e-4, vmax=1.0) if self.trace_log.isChecked() else Normalize(vmin=0.0, vmax=1.0)
+        time_intensity_log = self.time_intensity_log.isChecked()
+        wavelength_intensity_log = self.wavelength_intensity_log.isChecked()
 
         try:
             dmin, dmax, fmin, fmax = self._manual_trace_limits()
@@ -1276,12 +1372,16 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.ax_time.set_title("Time profile")
         self.ax_time.set_xlabel("Time (fs)")
         self.ax_time.set_ylabel("Intensity")
-        self.ax_time.set_ylim(0, 1.4)
+        if time_intensity_log:
+            self.ax_time.set_yscale("log")
+            self.ax_time.set_ylim(1e-4, 2.0)
+        else:
+            self.ax_time.set_yscale("linear")
+            self.ax_time.set_ylim(0, 1.4)
         self.ax_time.grid(True, alpha=0.3)
         self.ax_phase.yaxis.set_label_position("right")
         self.ax_phase.yaxis.tick_right()
         self.ax_phase.set_ylabel("")
-        self.ax_phase.set_yticks([])
         time_handles = []
         time_labels = []
         has_time_trace = False
@@ -1312,7 +1412,22 @@ class FrogResultGUI(QtWidgets.QMainWindow):
                 time_handles.append(h)
                 time_labels.append("Phase")
                 self.ax_phase.set_ylabel("Phase")
-                self.ax_phase.set_ylim(-np.pi, np.pi)
+                phase_arr = np.asarray(r.time_phase, dtype=float)
+                intensity_arr = np.asarray(getattr(r, "time_intensity", np.array([])), dtype=float)
+                mask = np.isfinite(phase_arr)
+                if intensity_arr.size == phase_arr.size and intensity_arr.size > 0:
+                    peak = np.max(intensity_arr)
+                    if peak > 0:
+                        mask &= intensity_arr >= 1e-3 * peak
+                if np.any(mask):
+                    phase_min = float(np.floor(np.min(phase_arr[mask])))
+                    phase_max = float(np.ceil(np.max(phase_arr[mask])))
+                    if phase_min >= phase_max:
+                        phase_min -= 1.0
+                        phase_max += 1.0
+                else:
+                    phase_min, phase_max = -np.pi, np.pi
+                self.ax_phase.set_ylim(phase_min, phase_max)
             except Exception as e:
                 display_errors.append(f"Time phase plot error: {e}")
                 self.ax_phase.set_ylabel("")
@@ -1342,7 +1457,12 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.ax_spec.set_title("Spectra")
         self.ax_spec.set_xlabel("Wavelength (nm)")
         self.ax_spec.set_ylabel("Intensity")
-        self.ax_spec.set_ylim(0, 1.4)
+        if wavelength_intensity_log:
+            self.ax_spec.set_yscale("log")
+            self.ax_spec.set_ylim(1e-4, 2.0)
+        else:
+            self.ax_spec.set_yscale("linear")
+            self.ax_spec.set_ylim(0, 1.4)
         self.ax_spec.grid(True, alpha=0.3)
         has_spec_curve = False
         try:

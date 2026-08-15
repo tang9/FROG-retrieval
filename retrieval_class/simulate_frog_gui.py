@@ -342,6 +342,21 @@ class _DualAxisCurve:
         self.phase_vb.setGeometry(self.plot_item.vb.sceneBoundingRect())
         self.phase_vb.linkedViewChanged(self.plot_item.vb, self.phase_vb.XAxis)
 
+    def shutdown(self) -> None:
+        """Detach phase_vb before the scene tears down, so a queued resize can't touch a deleted ViewBox."""
+        try:
+            self.plot_item.vb.sigResized.disconnect(self._update_views)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self.plot_item.vb.sigRangeChanged.disconnect(self._on_range_changed)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self.plot_item.scene().removeItem(self.phase_vb)
+        except (RuntimeError, AttributeError):
+            pass
+
     def _on_range_changed(self, *_args) -> None:
         self._update_top_ticks()
 
@@ -846,6 +861,11 @@ class SimulateFrogGUI(QtWidgets.QMainWindow):
         self.trace_log_vmin_edit.setText(f"{value:.4g}")
         if self.chk_trace_log.isChecked() and self._sim_result is not None:
             self._draw_simulation(self._sim_result)
+
+    def closeEvent(self, event) -> None:
+        self.time_view.shutdown()
+        self.spectrum_view.shutdown()
+        super().closeEvent(event)
 
     def _set_status(self, text: str, timeout_ms: int = 0) -> None:
         self.statusBar().showMessage(str(text), int(timeout_ms))

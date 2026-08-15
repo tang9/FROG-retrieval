@@ -315,6 +315,17 @@ class _DualAxisCurve:
         self.phase_vb.setGeometry(self.plot_item.vb.sceneBoundingRect())
         self.phase_vb.linkedViewChanged(self.plot_item.vb, self.phase_vb.XAxis)
 
+    def shutdown(self) -> None:
+        """Detach phase_vb before the scene tears down, so a queued resize can't touch a deleted ViewBox."""
+        try:
+            self.plot_item.vb.sigResized.disconnect(self._update_views)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self.plot_item.scene().removeItem(self.phase_vb)
+        except (RuntimeError, AttributeError):
+            pass
+
     def clear(self, title: str) -> None:
         self.plot_item.setTitle(title)
         self._intensity_best.setData([], [])
@@ -1037,6 +1048,11 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
         self._worker.request_stop()
         self.btn_stop.setEnabled(False)
         self._set_status("Stop requested... waiting for current iteration to finish.")
+
+    def closeEvent(self, event) -> None:
+        self.time_dual.shutdown()
+        self.freq_dual.shutdown()
+        super().closeEvent(event)
 
     @QtCore.Slot()
     def _cleanup_worker(self) -> None:

@@ -140,7 +140,7 @@ class FROG_result:
         param,_ = fit_peak(angular_freq, self.freq_intensity)
         area,center,sigma = param
         angular_freq0 = center
-        _, _, x1, x2 = find_peak_ratio(angular_freq, self.freq_intensity, 0.02)
+        _, _, x1, x2 = find_peak_ratio(angular_freq, self.freq_intensity, 0.004)
         if freq_min is None:
             angular_freq_min = x1
         else:
@@ -161,9 +161,11 @@ class FROG_result:
         poly = np.poly1d(p)
         GDD = float(np.polyder(poly, 2)(0.0))
         TOD = float(np.polyder(poly, 3)(0.0))
+        disp_orders = {n: float(np.polyder(poly, n)(0.0)) for n in range(2, fit_order + 1)}
         return {
             "GDD": GDD,
             "TOD": TOD,
+            "disp_orders": disp_orders,
             "phase_fit": phase_fit,
             "angular_freq": angular_freq + angular_freq0,
             "angular_freq0": angular_freq0,
