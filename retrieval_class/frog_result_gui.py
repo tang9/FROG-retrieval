@@ -8,7 +8,6 @@ os.environ.setdefault("QT_API", "pyside6")
 import matplotlib
 matplotlib.use("QtAgg")
 import numpy as np
-import pyqtgraph as pg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.colors import LogNorm, Normalize
@@ -16,17 +15,13 @@ from PySide6 import QtWidgets, QtCore
 
 from .frog_result import FROG_result
 from .common import custom_cmap, find_peak_fwhm
+from .output_paths import build_retrieval_save_prefix
 
 C_LIGHT = 299792458.0
 
 def _build_retrieval_save_prefix(prefix: str):
-    prefix_str = str(prefix).strip()
-    if not prefix_str:
-        raise ValueError("Save prefix cannot be empty.")
-    source_dir = os.path.dirname(os.path.abspath(prefix_str))
-    retrieval_dir = os.path.join(source_dir, "retrieval_result")
+    retrieval_dir, save_prefix = build_retrieval_save_prefix(prefix)
     os.makedirs(retrieval_dir, exist_ok=True)
-    save_prefix = os.path.join(retrieval_dir, os.path.basename(prefix_str))
     return retrieval_dir, save_prefix
 
 
@@ -89,14 +84,19 @@ def import_data_1d(
     return np.array(x), np.array(y)
 
 
-class FrequencyAnalysisDialog(QtWidgets.QDialog):
-    def __init__(self, result_obj, parent=None, status_sink=None):
+class FrequencyAnalysisWidget(QtWidgets.QWidget):
+    def __init__(
+        self,
+        result_obj,
+        parent=None,
+        status_sink=None,
+        time_limits_provider=None,
+    ):
         super().__init__(parent)
         self.result_obj = result_obj
         self._material_module_cache = {}
         self._status_sink = status_sink
-        self.setWindowTitle("Frequency Analysis")
-        self.resize(1100, 560)
+        self._time_limits_provider = time_limits_provider
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
@@ -144,58 +144,16 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
         mat_row.addWidget(self.material_disp_label)
         mat_row.addStretch(1)
 
-        splitter = QtWidgets.QSplitter()
-        splitter.setOrientation(pg.QtCore.Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(2)
-        splitter.setChildrenCollapsible(False)
-        layout.addWidget(splitter, 1)
-
-        self.pg = pg.PlotWidget()
-        self.pg.setBackground("w")
-        splitter.addWidget(self.pg)
-
-        self.plot_item = self.pg.getPlotItem()
-        self.plot_item.showGrid(x=True, y=True, alpha=0.25)
-        self.plot_item.setLabel("bottom", "Frequency (PHz)")
-        self.plot_item.setLabel("left", "Phase")
-        self.plot_item.showAxis("right")
-        self.plot_item.showAxis("top")
-        self.plot_item.getAxis("left").enableAutoSIPrefix(False)
-        self.plot_item.getAxis("bottom").enableAutoSIPrefix(False)
-        self.plot_item.getAxis("right").enableAutoSIPrefix(False)
-        self.plot_item.getAxis("top").enableAutoSIPrefix(False)
-        self.plot_item.getAxis("left").setPen("k")
-        self.plot_item.getAxis("bottom").setPen("k")
-        self.plot_item.getAxis("right").setPen("k")
-        self.plot_item.getAxis("top").setPen("k")
-        self.plot_item.getAxis("left").setTextPen("k")
-        self.plot_item.getAxis("bottom").setTextPen("k")
-        self.plot_item.getAxis("right").setTextPen("k")
-        self.plot_item.getAxis("top").setTextPen("k")
-        self.plot_item.getAxis("top").setLabel("Round Frequency (rad/PHz)")
-        self.plot_item.getAxis("right").setLabel("Intensity")
-
-        self.right_vb = pg.ViewBox()
-        self.plot_item.scene().addItem(self.right_vb)
-        self.plot_item.getAxis("right").linkToView(self.right_vb)
-        self.right_vb.setXLink(self.plot_item.vb)
-        self.plot_item.vb.sigResized.connect(self._sync_right_axis)
-        self._sync_right_axis()
-
-        self.time_pg = pg.PlotWidget()
-        self.time_pg.setBackground("w")
-        splitter.addWidget(self.time_pg)
-        self.time_plot = self.time_pg.getPlotItem()
-        self.time_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.time_plot.setLabel("bottom", "Time (fs)")
-        self.time_plot.setLabel("left", "Intensity")
-        self.time_plot.getAxis("left").enableAutoSIPrefix(False)
-        self.time_plot.getAxis("bottom").enableAutoSIPrefix(False)
-        self.time_plot.getAxis("left").setPen("k")
-        self.time_plot.getAxis("bottom").setPen("k")
-        self.time_plot.getAxis("left").setTextPen("k")
-        self.time_plot.getAxis("bottom").setTextPen("k")
-        self.time_plot.addLegend()
+        self.fig = Figure(figsize=(12, 5.5), dpi=90)
+        self.freq_ax = self.fig.add_subplot(121)
+        self.intensity_ax = self.freq_ax.twinx()
+        self.angular_freq_ax = self.freq_ax.secondary_xaxis(
+            "top",
+            functions=(lambda value: 2.0 * np.pi * value, lambda value: value / (2.0 * np.pi)),
+        )
+        self.time_ax = self.fig.add_subplot(122)
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        layout.addWidget(self.canvas, 1)
 
         self.update_btn.clicked.connect(self.redraw)
         self.save_btn.clicked.connect(self.save_phase_analysis)
@@ -393,10 +351,6 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
         phi_add[valid] = phase_out
         return phi_add, mat_gdd, mat_tod
 
-    def _sync_right_axis(self):
-        self.right_vb.setGeometry(self.plot_item.vb.sceneBoundingRect())
-        self.right_vb.linkedViewChanged(self.plot_item.vb, self.right_vb.XAxis)
-
     def _parse_range(self):
         fmin = self.freq_min_edit.text().strip()
         fmax = self.freq_max_edit.text().strip()
@@ -423,15 +377,6 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
             return None
         return fit_order
 
-    def _set_top_ticks(self, x):
-        if len(x) < 2:
-            return
-        xmin = float(np.min(x))
-        xmax = float(np.max(x))
-        ticks = np.linspace(xmin, xmax, 6)
-        top_ticks = [(float(t), f"{2*np.pi*t:.2f}") for t in ticks]
-        self.plot_item.getAxis("top").setTicks([top_ticks])
-
     def _parse_dispersion_add(self):
         gdd_text = self.add_gdd_edit.text().strip()
         tod_text = self.add_tod_edit.text().strip()
@@ -443,31 +388,44 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
             return 0.0, 0.0
         return add_gdd, add_tod
 
-    def _set_legend_text_black(self, legend):
-        if legend is None:
-            return
-        for _, label in legend.items:
-            try:
-                text = label.text
-                label.setText(text, color="k", size="12pt")
-            except Exception:
-                pass
-
     def save_phase_analysis(self):
+        if self.result_obj is None:
+            self._notify("No data: please load a result first.", error=True)
+            return
         try:
             retrieval_dir, save_prefix = _build_retrieval_save_prefix(self.result_obj.prefix)
             out_path = f"{save_prefix}_phase_analysis.png"
-            pixmap = self.grab()
-            if not pixmap.save(out_path):
-                raise RuntimeError(f"Failed to save image: {out_path}")
+            self.fig.savefig(out_path, dpi=200, bbox_inches="tight")
             self._notify(f"Saved to: {retrieval_dir} | Phase analysis: {out_path}", error=False)
         except Exception as e:
             self._notify(f"Save error: {e}", error=True)
 
     def redraw(self):
-        self.plot_item.clear()
-        self.right_vb.clear()
-        self.time_plot.clear()
+        self.freq_ax.clear()
+        self.intensity_ax.clear()
+        self.time_ax.clear()
+        self.freq_ax.set_xlabel("Frequency (PHz)")
+        self.freq_ax.set_ylabel("Phase (rad)")
+        self.intensity_ax.set_ylabel("Intensity")
+        self.intensity_ax.yaxis.set_label_position("right")
+        self.intensity_ax.yaxis.tick_right()
+        self.intensity_ax.spines["right"].set_visible(True)
+        self.intensity_ax.spines["left"].set_visible(False)
+        self.intensity_ax.set_ylim(0.0, 1.4)
+        self.angular_freq_ax.set_xlabel("Angular frequency (rad/fs)")
+        self.time_ax.set_xlabel("Time (fs)")
+        self.time_ax.set_ylabel("Intensity")
+        self.time_ax.set_ylim(0.0, 1.4)
+        self.freq_ax.grid(True, alpha=0.25)
+        self.time_ax.grid(True, alpha=0.25)
+
+        if self.result_obj is None:
+            self.freq_ax.set_title("Phase analysis (load a result first)")
+            self.time_ax.set_title("Dispersion compensation")
+            self.fig.tight_layout()
+            self.canvas.draw_idle()
+            return
+
         try:
             fmin, fmax = self._parse_range()
             fit_order = self._parse_fit_order()
@@ -502,65 +460,70 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
                 self.material_disp_label.setText("Material GDD/TOD: --")
 
             # Left axis: phase and polynomial fit.
-            self.plot_item.plot(
+            phase_line = self.freq_ax.plot(
                 freq,
                 phase,
-                pen=pg.mkPen((214, 39, 40), width=2.6),
-                symbol="o",
-                symbolSize=4,
-                symbolBrush=pg.mkBrush(214, 39, 40),
-                symbolPen=None,
-            )
-            self.plot_item.plot(
+                color="tab:red",
+                linewidth=1.8,
+                marker="o",
+                markersize=3,
+                label="Retrieved phase",
+            )[0]
+            compensated_line = self.freq_ax.plot(
                 freq,
                 phase_comp,
-                pen=pg.mkPen((130, 130, 130), width=2.8),
-            )
-            self.plot_item.plot(
+                color="0.5",
+                linewidth=2.0,
+                label="Compensated phase",
+            )[0]
+            fit_line = self.freq_ax.plot(
                 freq_fit,
                 phase_fit,
-                pen=pg.mkPen((0, 0, 255), width=3.6, style=pg.QtCore.Qt.PenStyle.DashLine),
-            )
+                color="tab:blue",
+                linewidth=2.2,
+                linestyle="--",
+                label="Polynomial fit",
+            )[0]
 
             # Right axis: intensity.
-            intensity_curve = pg.PlotDataItem(
+            intensity_line = self.intensity_ax.plot(
                 freq,
                 intensity,
-                pen=pg.mkPen((45, 45, 45), width=2.6),
-                symbol="o",
-                symbolSize=4,
-                symbolBrush=(70, 70, 70),
-                symbolPen=None,
+                color="0.15",
+                linewidth=1.6,
+                marker="o",
+                markersize=3,
+                alpha=0.75,
+                label="Intensity",
+            )[0]
+            center_line = self.freq_ax.axvline(
+                freq0,
+                color="0.4",
+                linewidth=1.4,
+                linestyle="--",
+                label=f"ω₀={angular_freq0:.3f} rad/fs",
             )
-            self.right_vb.addItem(intensity_curve)
-            ref_line = pg.InfiniteLine(
-                pos=freq0,
-                angle=90,
-                pen=pg.mkPen((100, 100, 100), width=2.6, style=pg.QtCore.Qt.PenStyle.DashLine),
-                label=f"angular_freq0={angular_freq0:.3f}",
-                labelOpts={"position": 0.92, "color": (80, 80, 80)},
-            )
-            self.plot_item.addItem(ref_line)
 
             if freq_fit.size > 1:
                 fit_min = float(np.min(freq_fit))
                 fit_max = float(np.max(freq_fit))
                 fit_center = 0.5 * (fit_min + fit_max)
                 fit_half = 0.5 * (fit_max - fit_min)
-                self.plot_item.setXRange(fit_center - 3 * fit_half, fit_center + 3 * fit_half, padding=0.0)
+                self.freq_ax.set_xlim(fit_center - 3 * fit_half, fit_center + 3 * fit_half)
             else:
-                self.plot_item.setXRange(float(np.min(freq)), float(np.max(freq)), padding=0.02)
+                self.freq_ax.set_xlim(float(np.min(freq)), float(np.max(freq)))
 
-            self.plot_item.setYRange(-np.pi, np.pi, padding=0.0)
-            self.plot_item.vb.enableAutoRange(axis="y", enable=False)
-            self.right_vb.enableAutoRange(axis="y", enable=True)
-            self._sync_right_axis()
-            self._set_top_ticks(freq)
-
-            self.plot_item.setTitle(
-                f"<span style='color:#0000ff; font-size:11pt;'>"
-                f"GDD={res['GDD']:.2f} fs^2, TOD={res['TOD']:.2f} fs^3"
-                f"</span>"
+            self.freq_ax.set_ylim(-np.pi, np.pi)
+            self.intensity_ax.set_ylim(0.0, 1.4)
+            self.freq_ax.set_title(
+                f"GDD={res['GDD']:.0f} fs², TOD={res['TOD']:.0f} fs³",
+                color="tab:blue", fontsize=10,
+            )
+            self.freq_ax.legend(
+                [phase_line, compensated_line, fit_line, center_line, intensity_line],
+                ["Retrieved phase", "Compensated phase", "Polynomial fit", center_line.get_label(), "Intensity"],
+                loc="best",
+                fontsize=10,
             )
 
             # Time-domain view after adding extra dispersion terms.
@@ -575,36 +538,54 @@ class FrequencyAnalysisDialog(QtWidgets.QDialog):
             _, _, fwhm_new,_ = find_peak_fwhm(new_time, new_intensity)
             _, _, fwhm_ftl,_ = find_peak_fwhm(ftl_time, ftl_intensity)
 
-            self.time_plot.plot(
+            self.time_ax.plot(
                 raw_time,
                 raw_intensity,
-                pen=pg.mkPen((140, 140, 140), width=3.0),
-                name=f"Original FWHM={fwhm_raw:.1f} fs",
+                color="0.5",
+                linewidth=2.0,
+                label=f"Original FWHM={fwhm_raw:.1f} fs",
             )
-            self.time_plot.plot(
+            self.time_ax.plot(
                 new_time,
                 new_intensity,
-                pen=pg.mkPen((220, 45, 45), width=3.8),
-                name=f"Compensated FWHM={fwhm_new:.1f} fs",
+                color="tab:red",
+                linewidth=2.4,
+                label=f"Compensated FWHM={fwhm_new:.1f} fs",
             )
-            self.time_plot.plot(
+            self.time_ax.plot(
                 ftl_time,
                 ftl_intensity,
-                pen=pg.mkPen((0, 0, 255), width=3.6, style=pg.QtCore.Qt.PenStyle.DashLine),
-                name=f"FTL FWHM={fwhm_ftl:.1f} fs",
+                color="tab:blue",
+                linewidth=2.2,
+                linestyle="--",
+                label=f"FTL FWHM={fwhm_ftl:.1f} fs",
             )
             pulse0 = float(self.result_obj.pulse_duration)
-            self.time_plot.setXRange(-3.5* pulse0, 2.5 * pulse0, padding=0.0)
-            self._set_legend_text_black(self.time_plot.legend)
+            time_min = None
+            time_max = None
+            if callable(self._time_limits_provider):
+                time_min, time_max = self._time_limits_provider()
+            if (
+                time_min is not None
+                and time_max is not None
+                and time_min < time_max
+            ):
+                self.time_ax.set_xlim(time_min, time_max)
+            else:
+                self.time_ax.set_xlim(-3.5 * pulse0, 2.5 * pulse0)
+            self.time_ax.set_ylim(0.0, 1.4)
+            self.time_ax.legend(fontsize=10)
             mat_text = f", material={material} {thickness_mm:.4g} mm" if material is not None and abs(thickness_mm) > 0 else ""
-            self.time_plot.setTitle(
-                f"<span style='font-size:10pt;'>add_GDD={add_gdd:.2f} fs^2, add_TOD={add_tod:.2f} fs^3{mat_text}</span>"
+            self.time_ax.set_title(
+                f"add_GDD={add_gdd:.0f} fs², add_TOD={add_tod:.0f} fs³{mat_text}",fontsize=10
             )
         except Exception as e:
             self.material_disp_label.setText("Material GDD/TOD: error")
-            self.plot_item.setTitle(f"Frequency analysis error: {e}")
-            self.time_plot.setTitle(f"Compensation plot error: {e}")
+            self.freq_ax.set_title(f"Frequency analysis error: {e}")
+            self.time_ax.set_title(f"Compensation plot error: {e}")
             self._notify(f"Frequency analysis error: {e}", error=True)
+        self.fig.tight_layout()
+        self.canvas.draw_idle()
 
 
 class FrogResultGUI(QtWidgets.QMainWindow):
@@ -618,7 +599,7 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.measured_wave = None
         self.measured_intensity = None
         self._cbars = {}
-        self.freq_analysis_dialog = None
+        self.phase_analysis_widget = None
 
         self._build_ui()
         self._build_status_bar()
@@ -646,7 +627,7 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         root.addWidget(split, 1)
 
         left_panel = QtWidgets.QWidget()
-        left_panel.setFixedWidth(250)
+        left_panel.setFixedWidth(200)
         left_layout = QtWidgets.QVBoxLayout(left_panel)
         left_layout.setContentsMargins(2, 2, 2, 2)
         left_layout.setSpacing(2)
@@ -713,9 +694,7 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.raw_spectra_edit = QtWidgets.QLineEdit()
         row2.addWidget(self.raw_spectra_edit, 1)
         self.open_spectra_btn = QtWidgets.QPushButton("Open Spectra")
-        self.freq_analysis_btn = QtWidgets.QPushButton("Phase Analysis")
         row2.addWidget(self.open_spectra_btn)
-        row2.addWidget(self.freq_analysis_btn)
 
         self.fig = Figure(figsize=(12, 9), dpi=80)
         self.ax_exp = self.fig.add_subplot(221)
@@ -724,7 +703,22 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.ax_phase = self.ax_time.twinx()
         self.ax_spec = self.fig.add_subplot(224)
         self.canvas = FigureCanvasQTAgg(self.fig)
-        right_layout.addWidget(self.canvas, 1)
+
+        self.result_tabs = QtWidgets.QTabWidget()
+        right_layout.addWidget(self.result_tabs, 1)
+        result_tab = QtWidgets.QWidget()
+        result_tab_layout = QtWidgets.QVBoxLayout(result_tab)
+        result_tab_layout.setContentsMargins(0, 0, 0, 0)
+        result_tab_layout.addWidget(self.canvas, 1)
+        self.result_tabs.addTab(result_tab, "FROG Result")
+
+        self.phase_analysis_widget = FrequencyAnalysisWidget(
+            self.result_obj,
+            self,
+            status_sink=self._show_status,
+            time_limits_provider=self._phase_analysis_time_limits,
+        )
+        self.result_tabs.addTab(self.phase_analysis_widget, "Phase Analysis")
 
         self.open_btn.clicked.connect(self.open_result_file)
         self.load_btn.clicked.connect(self.load_result)
@@ -732,9 +726,9 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.open_spectra_btn.clicked.connect(self.open_raw_spectra)
         self.trace_log.toggled.connect(self.redraw)
         self.time_reverse_btn.toggled.connect(self._on_time_reverse_toggled)
-        self.freq_analysis_btn.clicked.connect(self.open_frequency_analysis)
-        self.time_min.editingFinished.connect(self.redraw)
-        self.time_max.editingFinished.connect(self.redraw)
+        self.result_tabs.currentChanged.connect(self._on_result_tab_changed)
+        self.time_min.editingFinished.connect(self._on_time_limits_changed)
+        self.time_max.editingFinished.connect(self._on_time_limits_changed)
         self.wave_min.editingFinished.connect(self.redraw)
         self.wave_max.editingFinished.connect(self.redraw)
         self.delay_min.editingFinished.connect(self.redraw)
@@ -1003,7 +997,7 @@ class FrogResultGUI(QtWidgets.QMainWindow):
         self.prefix_edit.setText(prefix)
         self.result_obj.set_time_reversed(self.time_reverse_btn.isChecked())
         self.redraw()
-        self._sync_frequency_analysis_dialog(redraw=True)
+        self._sync_phase_analysis_tab(redraw=True)
         self._show_status(f"Loaded in-memory result: {prefix}", error=False)
 
     def open_result_file(self):
@@ -1034,7 +1028,7 @@ class FrogResultGUI(QtWidgets.QMainWindow):
                 self.result_obj = self._load_partial_result(prefix)
             self.result_obj.set_time_reversed(self.time_reverse_btn.isChecked())
             self.redraw()
-            self._sync_frequency_analysis_dialog(redraw=True)
+            self._sync_phase_analysis_tab(redraw=True)
             missing = getattr(self.result_obj, "_missing_files", [])
             load_errors = getattr(self.result_obj, "_load_errors", [])
             if missing or load_errors:
@@ -1056,14 +1050,29 @@ class FrogResultGUI(QtWidgets.QMainWindow):
             except Exception as e:
                 self._show_status(f"Time reverse error: {e}", error=True)
         self.redraw()
-        self._sync_frequency_analysis_dialog(redraw=True)
+        self._sync_phase_analysis_tab(redraw=True)
 
-    def _sync_frequency_analysis_dialog(self, redraw: bool = False):
-        if self.freq_analysis_dialog is None:
+    def _phase_analysis_time_limits(self):
+        time_min_text = self.time_min.text().strip()
+        time_max_text = self.time_max.text().strip()
+        time_min = float(time_min_text) if time_min_text else None
+        time_max = float(time_max_text) if time_max_text else None
+        return time_min, time_max
+
+    def _on_time_limits_changed(self):
+        self.redraw()
+        self._sync_phase_analysis_tab(redraw=True)
+
+    def _sync_phase_analysis_tab(self, redraw: bool = False):
+        if self.phase_analysis_widget is None:
             return
-        self.freq_analysis_dialog.result_obj = self.result_obj
-        if redraw and self.freq_analysis_dialog.isVisible():
-            self.freq_analysis_dialog.redraw()
+        self.phase_analysis_widget.result_obj = self.result_obj
+        if redraw and self.result_tabs.currentWidget() is self.phase_analysis_widget:
+            self.phase_analysis_widget.redraw()
+
+    def _on_result_tab_changed(self, index: int):
+        if self.result_tabs.widget(index) is self.phase_analysis_widget:
+            self._sync_phase_analysis_tab(redraw=True)
 
     def open_raw_spectra(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1105,30 +1114,6 @@ class FrogResultGUI(QtWidgets.QMainWindow):
             self._show_status(f"Saved to: {retrieval_dir} | Retrieval figure: {out_path}", error=False)
         except Exception as e:
             self._show_status(f"Save error: {e}", error=True)
-
-    def open_frequency_analysis(self):
-        if self.result_obj is None:
-            self._show_status("No data: please load a result first.", error=True)
-            return
-        required = ("freq", "freq_intensity", "freq_phase", "time", "time_intensity", "time_phase")
-        if not all(self._has_array_data(self.result_obj, name) for name in required):
-            self._show_status("Phase Analysis requires both .Ek.dat and .Ew.dat data.", error=True)
-            return
-
-        if self.freq_analysis_dialog is not None and self.freq_analysis_dialog.isVisible():
-            self._sync_frequency_analysis_dialog(redraw=True)
-            self.freq_analysis_dialog.raise_()
-            self.freq_analysis_dialog.activateWindow()
-            return
-
-        self.freq_analysis_dialog = FrequencyAnalysisDialog(self.result_obj, self, status_sink=self._show_status)
-        self.freq_analysis_dialog.setModal(False)
-        self.freq_analysis_dialog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
-        self.freq_analysis_dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.freq_analysis_dialog.destroyed.connect(lambda *_: setattr(self, "freq_analysis_dialog", None))
-        self.freq_analysis_dialog.show()
-        self.freq_analysis_dialog.raise_()
-        self.freq_analysis_dialog.activateWindow()
 
     def _safe_remove_cbar(self, ax):
         cbar = self._cbars.pop(ax, None)

@@ -7,11 +7,13 @@ hot loops with typed memoryviews and fixed-size coefficient accumulation.
 
 import numpy as np
 cimport numpy as cnp
-from libc.math cimport sqrt
+from libc.math cimport exp, sqrt
 
 cnp.import_array()
 
 ctypedef cnp.complex128_t complex_t
+
+DELAY_SMEARING_API = 1
 
 cdef int GEOM_SHG = 0
 cdef int GEOM_PG = 1
@@ -192,8 +194,175 @@ def _mag_repl(esig, asig, weights):
     return w * target + (1.0 - w) * es
 
 
-def _min_gerr(esig, asig, weights):
-    e2 = np.abs(np.asarray(esig, dtype=np.complex128)) ** 2
+cdef cnp.ndarray[cnp.float64_t, ndim=1] _gaussian_kernel_code(
+    double sigma_samples,
+):
+    cdef int radius, size, k
+    cdef double x, kernel_sum = 0.0
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] kernel
+    cdef double[::1] kernel_view
+
+    if not np.isfinite(sigma_samples) or sigma_samples <= 1e-12:
+        return np.empty(0, dtype=np.float64)
+
+    radius = <int>(4.0 * sigma_samples + 0.5)
+    if radius < 1:
+        return np.empty(0, dtype=np.float64)
+
+    size = 2 * radius + 1
+    kernel = np.empty(size, dtype=np.float64)
+    kernel_view = kernel
+    for k in range(-radius, radius + 1):
+        x = k / sigma_samples
+        kernel_view[k + radius] = exp(-0.5 * x * x)
+        kernel_sum += kernel_view[k + radius]
+    for k in range(size):
+        kernel_view[k] /= kernel_sum
+    return kernel
+
+
+cdef cnp.ndarray[cnp.float64_t, ndim=2] _delay_smear_with_kernel_code(
+    object intensity,
+    cnp.ndarray[cnp.float64_t, ndim=1] kernel,
+):
+    """Gaussian convolution along the internal [frequency, delay] delay axis."""
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] values = np.ascontiguousarray(
+        np.asarray(intensity, dtype=np.float64)
+    )
+    cdef int rows = values.shape[0]
+    cdef int cols = values.shape[1]
+    cdef int size = kernel.shape[0]
+    cdef int radius, i, j, k, source_j
+    cdef double total
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] output
+    cdef double[:, ::1] values_view
+    cdef double[:, ::1] output_view
+    cdef double[::1] kernel_view
+
+    if size == 0:
+        return values
+
+    radius = size // 2
+    output = np.empty((rows, cols), dtype=np.float64)
+    values_view = values
+    output_view = output
+    kernel_view = kernel
+    for i in range(rows):
+        for j in range(cols):
+            total = 0.0
+            for k in range(-radius, radius + 1):
+                source_j = j + k
+                if 0 <= source_j < cols:
+                    total += (
+                        values_view[i, source_j] * kernel_view[k + radius]
+                    )
+            output_view[i, j] = total
+    return output
+
+
+cdef cnp.ndarray[cnp.float64_t, ndim=2] _delay_smear_intensity_code(
+    object intensity,
+    double sigma_samples,
+):
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] kernel = _gaussian_kernel_code(
+        sigma_samples
+    )
+    return _delay_smear_with_kernel_code(intensity, kernel)
+
+
+def _delay_smear_intensity(intensity, double sigma_samples=0.0):
+    return _delay_smear_intensity_code(intensity, sigma_samples)
+
+
+cdef tuple _prepare_trace_error_context_code(object asig, object weights):
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] measured_intensity = (
+        np.abs(np.asarray(asig, dtype=np.float64)) ** 2
+    )
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] weight_array = np.asarray(
+        weights, dtype=np.float64
+    )
+    cdef double measured_peak = float(np.max(measured_intensity))
+    cdef double pixel_norm = float(np.sqrt(measured_intensity.size))
+    cdef double gprime_denominator = float(
+        np.trapezoid(
+            np.trapezoid(
+                weight_array * (measured_intensity ** 2),
+                axis=0,
+            ),
+            axis=0,
+        )
+    )
+    return (
+        measured_intensity,
+        weight_array,
+        measured_peak,
+        pixel_norm,
+        gprime_denominator,
+    )
+
+
+cdef tuple _g_gprime_from_esig_code(
+    object esig,
+    cnp.ndarray[cnp.float64_t, ndim=2] measured_intensity,
+    cnp.ndarray[cnp.float64_t, ndim=2] weight_array,
+    double measured_peak,
+    double pixel_norm,
+    double gprime_denominator,
+    cnp.ndarray[cnp.float64_t, ndim=1] delay_smearing_kernel,
+):
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] model_intensity = (
+        _delay_smear_with_kernel_code(
+            np.abs(np.asarray(esig, dtype=np.complex128)) ** 2,
+            delay_smearing_kernel,
+        )
+    )
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] residual
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] weighted_square_error
+    cdef double denominator = float(
+        np.sum(weight_array * model_intensity * model_intensity)
+    )
+    cdef double scale, g, gp, numerator, ratio
+
+    if denominator <= 1e-30:
+        return float("inf"), float("inf"), 0.0
+
+    scale = float(
+        np.sum(weight_array * model_intensity * measured_intensity)
+        / denominator
+    )
+    residual = measured_intensity - scale * model_intensity
+    weighted_square_error = weight_array * residual * residual
+
+    if measured_peak <= 1e-30:
+        g = 0.0
+    elif pixel_norm <= 0.0:
+        g = float("inf")
+    else:
+        g = float(
+            np.sqrt(np.sum(weighted_square_error))
+            / measured_peak
+            / pixel_norm
+        )
+
+    if gprime_denominator <= 1e-30:
+        gp = float("inf")
+    else:
+        numerator = float(
+            np.trapezoid(
+                np.trapezoid(weighted_square_error, axis=0),
+                axis=0,
+            )
+        )
+        ratio = numerator / gprime_denominator
+        gp = sqrt(ratio) if ratio > 0.0 else 0.0
+    return g, gp, scale
+
+
+def _min_gerr(esig, asig, weights, double delay_smearing_sigma=0.0):
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] e2 = _delay_smear_intensity_code(
+        np.abs(np.asarray(esig, dtype=np.complex128)) ** 2,
+        delay_smearing_sigma,
+    )
     a2 = np.abs(np.asarray(asig, dtype=np.float64)) ** 2
     w = np.asarray(weights, dtype=np.float64)
     denom = float(np.sum(w * e2 * e2))
@@ -210,10 +379,21 @@ def _min_gerr(esig, asig, weights):
     return g, scale
 
 
-def _gprime_from_amp(asig, esig, double scale, weights):
+def _gprime_from_amp(
+    asig,
+    esig,
+    double scale,
+    weights,
+    double delay_smearing_sigma=0.0,
+):
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] model_intensity
     a = np.asarray(asig, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)
-    diff = np.abs(a ** 2 - scale * (np.abs(esig) ** 2)) ** 2
+    model_intensity = _delay_smear_intensity_code(
+        np.abs(np.asarray(esig, dtype=np.complex128)) ** 2,
+        delay_smearing_sigma,
+    )
+    diff = np.abs(a ** 2 - scale * model_intensity) ** 2
     num = float(np.trapezoid(np.trapezoid(w * diff, axis=0), axis=0))
     den = float(np.trapezoid(np.trapezoid(w * (a ** 4), axis=0), axis=0))
     if den <= 1e-30:
@@ -221,30 +401,65 @@ def _gprime_from_amp(asig, esig, double scale, weights):
     return float(np.sqrt(num / den)) if num > 0.0 else 0.0
 
 
-def _g_gprime_error(asig, et, weights, geometry):
+def _g_gprime_error(
+    asig,
+    et,
+    weights,
+    geometry,
+    double delay_smearing_sigma=0.0,
+):
     cdef int geom = _geometry_code(geometry)
+    cdef tuple context = _prepare_trace_error_context_code(asig, weights)
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] measured_intensity = context[0]
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] weight_array = context[1]
+    cdef double measured_peak = context[2]
+    cdef double pixel_norm = context[3]
+    cdef double gprime_denominator = context[4]
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] delay_smearing_kernel = (
+        _gaussian_kernel_code(delay_smearing_sigma)
+    )
     esig = _fftc(_calc_esig_geom_code(et, geom), axis=0)
-    g, a = _min_gerr(esig, asig, weights)
+    g, gp, _ = _g_gprime_from_esig_code(
+        esig,
+        measured_intensity,
+        weight_array,
+        measured_peak,
+        pixel_norm,
+        gprime_denominator,
+        delay_smearing_kernel,
+    )
     if not np.isfinite(g):
         return float("inf"), float("inf")
-    return float(g), float(_gprime_from_amp(asig, esig, a, weights))
+    return float(g), float(gp)
 
 
-def _g_error(asig, et, weights, geometry):
-    g, _ = _g_gprime_error(asig, et, weights, geometry)
+def _g_error(asig, et, weights, geometry, double delay_smearing_sigma=0.0):
+    g, _ = _g_gprime_error(
+        asig, et, weights, geometry, delay_smearing_sigma
+    )
     return float(g)
 
 
-def _gprime_error(asig, et, weights, geometry):
-    _, gp = _g_gprime_error(asig, et, weights, geometry)
+def _gprime_error(asig, et, weights, geometry, double delay_smearing_sigma=0.0):
+    _, gp = _g_gprime_error(
+        asig, et, weights, geometry, delay_smearing_sigma
+    )
     return float(gp)
 
 
-def compare_gerror_cy(ew_int, asig_amp, weights, geometry):
+def compare_gerror_cy(
+    ew_int,
+    asig_amp,
+    weights,
+    geometry,
+    double delay_smearing_sigma=0.0,
+):
     field = _ifftc(np.asarray(ew_int, dtype=np.complex128), axis=0)
     esig = _fftc(_calc_esig_geom_code(field, _geometry_code(geometry)), axis=0)
     asig_wt = _quickscale(np.abs(esig))
-    g, _ = _min_gerr(asig_wt, asig_amp, weights)
+    g, _ = _min_gerr(
+        asig_wt, asig_amp, weights, delay_smearing_sigma
+    )
     return float(g)
 
 
@@ -510,9 +725,23 @@ def quickfrog_cy(
     weights,
     geometry="shg-frog",
     stop_requested=None,
+    double delay_smearing_sigma=0.0,
 ):
     """Geometry-aware Cython version of the quickfrog inner loop."""
     cdef int geom = _geometry_code(geometry)
+    cdef tuple error_context = _prepare_trace_error_context_code(
+        asig_amp, weights
+    )
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] measured_intensity = (
+        error_context[0]
+    )
+    cdef cnp.ndarray[cnp.float64_t, ndim=2] error_weights = error_context[1]
+    cdef double measured_peak = error_context[2]
+    cdef double pixel_norm = error_context[3]
+    cdef double gprime_denominator = error_context[4]
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] delay_smearing_kernel = (
+        _gaussian_kernel_code(delay_smearing_sigma)
+    )
     e = np.ascontiguousarray(np.asarray(et0, dtype=np.complex128).ravel()).copy()
     n = int(max(1, max_iter))
 
@@ -548,8 +777,15 @@ def quickfrog_cy(
         esig = _calc_esig_geom_code(e, geom)
         esig_w = _fftc(esig, axis=0)
 
-        g, a = _min_gerr(esig_w, asig_amp, weights)
-        gp = _gprime_from_amp(asig_amp, esig_w, a, weights)
+        g, gp, a = _g_gprime_from_esig_code(
+            esig_w,
+            measured_intensity,
+            error_weights,
+            measured_peak,
+            pixel_norm,
+            gprime_denominator,
+            delay_smearing_kernel,
+        )
 
         if a > 0:
             e = _apply_g_factor_code(e, a, geom)
@@ -582,8 +818,15 @@ def quickfrog_cy(
 
         esig = _calc_esig_geom_code(e, geom)
         esig_w = _fftc(esig, axis=0)
-        g, a = _min_gerr(esig_w, asig_amp, weights)
-        gp = _gprime_from_amp(asig_amp, esig_w, a, weights)
+        g, gp, a = _g_gprime_from_esig_code(
+            esig_w,
+            measured_intensity,
+            error_weights,
+            measured_peak,
+            pixel_norm,
+            gprime_denominator,
+            delay_smearing_kernel,
+        )
 
         if a > 0:
             e = _apply_g_factor_code(e, a, geom)
@@ -599,10 +842,14 @@ def quickfrog_cy(
             et_best_gp = e.copy()
 
     if not np.isfinite(g_best):
-        g_best = _g_error(asig_amp, e, weights, geometry)
+        g_best = _g_error(
+            asig_amp, e, weights, geometry, delay_smearing_sigma
+        )
         et_best_g = e.copy()
     if not np.isfinite(gp_best):
-        gp_best = _gprime_error(asig_amp, e, weights, geometry)
+        gp_best = _gprime_error(
+            asig_amp, e, weights, geometry, delay_smearing_sigma
+        )
         et_best_gp = e.copy()
 
     return (

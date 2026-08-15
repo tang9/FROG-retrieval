@@ -26,6 +26,7 @@ from .common import find_index, bin3, plot_1d, plot_2d, fit_peak, gaussian_funct
 
 speed_light = 299792458.0
 StrArrayLike = Sequence[str] | np.ndarray
+LOWPASS_FIT_FREQUENCY_FACTOR = 0.1592
 
 def _fit_gaussian(x, y):
     x_arr = np.asarray(x, dtype=float)
@@ -48,6 +49,60 @@ def _fit_gaussian(x, y):
     return fit
 
 
+def _median_axis_step(axis, axis_name):
+    values = np.asarray(axis, dtype=float).ravel()
+    if values.size < 2:
+        raise ValueError(f"{axis_name} axis needs at least two points.")
+    differences = np.abs(np.diff(values))
+    differences = differences[np.isfinite(differences) & (differences > 0)]
+    if differences.size == 0:
+        raise ValueError(f"{axis_name} axis has no valid sampling interval.")
+    return float(np.median(differences))
+
+
+def legacy_cutoff_to_scales(delay, wavelength, trace, cutoff):
+    """Convert the legacy fit-width multiplier to physical low-pass scales."""
+    cutoff_value = float(cutoff)
+    if not np.isfinite(cutoff_value) or cutoff_value <= 0:
+        raise ValueError("Legacy cutoff ratio must be a positive finite number.")
+
+    delay_values = np.asarray(delay, dtype=float).ravel()
+    wavelength_values = np.asarray(wavelength, dtype=float).ravel()
+    trace_values = np.asarray(trace, dtype=float)
+    if trace_values.shape != (delay_values.size, wavelength_values.size):
+        raise ValueError(
+            "Trace shape must match delay x wavelength for legacy cutoff conversion."
+        )
+
+    delay_count = delay_values.size - (delay_values.size % 2 == 0)
+    wavelength_count = wavelength_values.size - (wavelength_values.size % 2 == 0)
+    filtered_trace = trace_values[:delay_count, :wavelength_count]
+    delay_fit = _fit_gaussian(
+        np.arange(delay_count), np.sum(filtered_trace, axis=1)
+    )
+    wavelength_fit = _fit_gaussian(
+        np.arange(wavelength_count), np.sum(filtered_trace, axis=0)
+    )
+    delay_sigma = abs(float(delay_fit.sigma))
+    wavelength_sigma = abs(float(wavelength_fit.sigma))
+    if not np.isfinite(delay_sigma) or delay_sigma <= 0:
+        raise ValueError("Cannot derive a valid delay fit width for cutoff conversion.")
+    if not np.isfinite(wavelength_sigma) or wavelength_sigma <= 0:
+        raise ValueError("Cannot derive a valid wavelength fit width for cutoff conversion.")
+
+    delay_scale = (
+        _median_axis_step(delay_values[:delay_count], "Delay")
+        * delay_sigma
+        / (LOWPASS_FIT_FREQUENCY_FACTOR * cutoff_value)
+    )
+    wavelength_scale = (
+        _median_axis_step(wavelength_values[:wavelength_count], "Wavelength")
+        * wavelength_sigma
+        / (LOWPASS_FIT_FREQUENCY_FACTOR * cutoff_value)
+    )
+    return float(delay_scale), float(wavelength_scale)
+
+
 # Main data pipeline for FROG trace conversion and FRG binning.
 class FROG:
     def __init__(self, input:str|StrArrayLike|dict, wavelength_range=None, wavelength_bin = 1, \
@@ -55,7 +110,8 @@ class FROG:
                  delay_step="mm", delay_correction=2.0,\
                  edge = 10, subx=True, suby=True, \
                  corner_suppression = False, mask_frg = None, constant_bkg = 0,\
-                 time_zero=True, time_range = None, raw=False, N = 128, profile=False):
+                 time_zero=True, time_range = None, raw=False, N = 128, profile=False,\
+                 lowpass_delay_scale=None, lowpass_wavelength_scale=None):
         """
         Parameters
         ----------
@@ -68,7 +124,9 @@ class FROG:
         wavelength_range : tuple. the range of wavelength that will be used
         wavelength_bin : int. the binning step size in the wavelength axis, to reduce noise
         noise_filter : str. Can be "" (no noise filter),"Gaussian" (Gaussian filter, default sigma=1) or "Fourier" (Fourier low pass filter).
-        cutoff : int. Only used for Fourier low pass filter, to determine the frequency cut-off of the low pass filter
+        cutoff : float. Legacy Gaussian-fit cutoff ratio retained for compatibility.
+        lowpass_delay_scale : float or None. Minimum retained delay scale in fs.
+        lowpass_wavelength_scale : float or None. Minimum retained wavelength scale in nm.
         filter_axis : str ["wavelength", "delay", or "both"]. Only used for Fourier low pass filter, determine which axis will be filters
         delay_step : str ["m","mm","um","nm","ps","fs","as"]. the unit of the delays in the first line of the data
         delay_correction : int. default 2.0. Normally the delay is twice of the delay stage. 
@@ -134,7 +192,13 @@ class FROG:
             if noise_filter.find("Gaussian") != -1:
                 self.GaussianFilter(sigma,axis=filter_axis or "both")
             elif noise_filter.find("Low_pass") != -1:
-                self.FourierFilter("Butterworth",cutoff,axis=filter_axis or "both")
+                self.FourierFilter(
+                    "Butterworth",
+                    cutoff=cutoff,
+                    axis=filter_axis or "both",
+                    delay_scale=lowpass_delay_scale,
+                    wavelength_scale=lowpass_wavelength_scale,
+                )
             _mark(f"noise_filter:{noise_filter or 'none'}")
             #resudce constant background
             self.frog_trace = self.frog_trace - constant_bkg*np.max(self.frog_trace)
@@ -381,7 +445,14 @@ class FROG:
         else:
             print("GaussianFilter axis error! Use 'delay'/'x', 'wavelength'/'y', or 'both'.")
    
-    def FourierFilter(self,filter_type="Butterworth",cutoff=6,axis="both"): 
+    def FourierFilter(
+        self,
+        filter_type="Butterworth",
+        cutoff=6,
+        axis="both",
+        delay_scale=None,
+        wavelength_scale=None,
+    ):
         #do Fourier low pass filter to the frog trace
         axis_key = str(axis).strip().lower()
         trace = self.frog_trace
@@ -410,15 +481,41 @@ class FROG:
         frog_fft = np.fft.fft2(trace)
         m,n = frog_fft.shape #ndelay, nwave, should be odd
         
-        #determine the cut-off frequency of the low pass filter
-        fit1 = _fit_gaussian(np.arange(m), np.sum(trace, axis=1))
-        D1 = 0.1592*m/fit1.sigma*cutoff#6sigma
-        #0.1592 = 1/2pi, frequency->round frequency
-        #print("sigma_delay=%.2f, cut-off: %.2f"%(fit1.sigma,D1))
+        axis_delay = axis_key in ["d", "delay", "x", "b", "both"]
+        axis_wavelength = axis_key in ["w", "wavelength", "y", "b", "both"]
+        if not axis_delay and not axis_wavelength:
+            axis_delay = axis_wavelength = True
 
-        fit2 = _fit_gaussian(np.arange(n), np.sum(trace, axis=0))
-        D2 = 0.1592*n/fit2.sigma*cutoff#6sigma
-        #print("sigma_wave=%.2f, cut-off: %.2f"%(fit2.sigma,D2))
+        legacy_cutoff = None if cutoff is None else float(cutoff)
+
+        def cutoff_bins(values, count, scale, name, projection):
+            if scale is not None:
+                scale_value = float(scale)
+                if not np.isfinite(scale_value) or scale_value <= 0:
+                    raise ValueError(f"{name} low-pass scale must be positive.")
+                return count * _median_axis_step(values[:count], name) / scale_value
+            if legacy_cutoff is None:
+                return None
+            fit = _fit_gaussian(np.arange(count), projection)
+            sigma_value = abs(float(fit.sigma))
+            if not np.isfinite(sigma_value) or sigma_value <= 0:
+                raise ValueError(f"Cannot determine the legacy {name} cutoff.")
+            return LOWPASS_FIT_FREQUENCY_FACTOR * count / sigma_value * legacy_cutoff
+
+        D1 = cutoff_bins(
+            np.asarray(self.delay, dtype=float),
+            m,
+            delay_scale,
+            "Delay",
+            np.sum(trace, axis=1),
+        ) if axis_delay else None
+        D2 = cutoff_bins(
+            np.asarray(self.wavelength, dtype=float),
+            n,
+            wavelength_scale,
+            "Wavelength",
+            np.sum(trace, axis=0),
+        ) if axis_wavelength else None
         
         frog_fft = np.fft.fftshift(frog_fft) #shift the frequency, the center is low frequency
         #Center: m//2, n//2, 5: 2, 0-1&3-4
@@ -426,12 +523,14 @@ class FROG:
         #H[m//2-D1:m//2+D1+1,n//2-D2:n//2+D2+1]=1
         #filter_types=["Ideal","Gaussian","Butterworth","Hamming"]
         I, J = np.meshgrid(np.arange(m), np.arange(n), indexing='ij')
-        if axis_key in ["d", "delay", "x"]:
-            k = (I - m//2)**2 / D1**2
-        elif axis_key in ["w", "wavelength", "y"]:
-            k = (J - n//2)**2 / D2**2
-        else:
-            k = (I - m//2)**2 / D1**2 + (J - n//2)**2 / D2**2
+        filter_terms = []
+        if D1 is not None:
+            filter_terms.append((I - m//2)**2 / D1**2)
+        if D2 is not None:
+            filter_terms.append((J - n//2)**2 / D2**2)
+        if not filter_terms:
+            return
+        k = sum(filter_terms)
         if filter_type == "Ideal":
             H = (k <= 1).astype(float)
         elif filter_type == "Butterworth":

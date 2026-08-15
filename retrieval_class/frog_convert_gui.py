@@ -29,7 +29,8 @@ from matplotlib.figure import Figure
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 from .common import custom_cmap, fit_peak, gaussian_function
-from .frog_convert import FROG
+from .frog_convert import FROG, legacy_cutoff_to_scales
+from .output_paths import build_retrieval_save_prefix
 class Show1DDialog(QtWidgets.QDialog):
     def __init__(self, gui_parent):
         super().__init__(gui_parent)
@@ -205,6 +206,8 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self._cbars = {}
         self.last_dir = os.getcwd()
         self.one_d_dialog = None
+        self._pending_legacy_cutoff = None
+        self._legacy_cutoff_conversion_error = None
 
         self._build_ui()
         self.statusBar().showMessage("Ready", 0)
@@ -243,7 +246,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         root_layout.addWidget(split, 1)
 
         left_panel = QtWidgets.QWidget()
-        left_panel.setFixedWidth(300)
+        left_panel.setFixedWidth(320)
         left_layout = QtWidgets.QVBoxLayout(left_panel)
         left_layout.setContentsMargins(2, 2, 2, 2)
         left_layout.setSpacing(2)
@@ -254,6 +257,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         right_layout.setContentsMargins(2, 2, 2, 2)
         right_layout.setSpacing(2)
         split.addWidget(right_panel)
+        split.addWidget(right_panel)
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         QtCore.QTimer.singleShot(0, lambda: split.setSizes([250, 10_000]))
@@ -263,14 +267,42 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         g = QtWidgets.QGridLayout(params_box)
         g.setHorizontalSpacing(8)
         g.setVerticalSpacing(6)
-        for col in range(2):
-            g.setColumnStretch(col, 1)
+        g.setColumnStretch(0, 1)
+        g.setColumnStretch(1, 1)
+
+        def add_input(row, widget):
+            if isinstance(widget, QtWidgets.QComboBox):
+                widget.setSizeAdjustPolicy(
+                    QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+                )
+                widget.setMinimumContentsLength(1)
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                widget.sizePolicy().verticalPolicy(),
+            )
+            widget.setFixedWidth(110)
+            input_cell = QtWidgets.QWidget()
+            input_cell_layout = QtWidgets.QHBoxLayout(input_cell)
+            input_cell_layout.setContentsMargins(0, 0, 0, 0)
+            input_cell_layout.setSpacing(0)
+            input_cell_layout.addStretch(1)
+            input_cell_layout.addWidget(widget)
+            g.addWidget(input_cell, row, 1)
 
         def add_pair(row, text, widget):
-            g.addWidget(QtWidgets.QLabel(text), row, 0)
-            g.addWidget(widget, row, 1)
+            label = QtWidgets.QLabel(text)
+            label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Ignored,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
+            g.addWidget(label, row, 0)
+            add_input(row, widget)
 
         def add_check(row, checkbox):
+            checkbox.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Ignored,
+                checkbox.sizePolicy().verticalPolicy(),
+            )
             g.addWidget(checkbox, row, 0, 1, 2)
 
         self.range_enable = QtWidgets.QCheckBox("wavelength_range")
@@ -283,7 +315,12 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.noise_filter = QtWidgets.QComboBox()
         self.noise_filter.addItems(["", "Gaussian", "Low_pass"])
         self.sigma = QtWidgets.QLineEdit("1")
-        self.cutoff = QtWidgets.QLineEdit("8")
+        self.lowpass_delay_scale = QtWidgets.QLineEdit("")
+        self.lowpass_delay_scale.setPlaceholderText("fs")
+        self.lowpass_wavelength_scale = QtWidgets.QLineEdit("")
+        self.lowpass_wavelength_scale.setPlaceholderText("nm")
+        self.lowpass_delay_scale.textEdited.connect(self._clear_pending_legacy_cutoff)
+        self.lowpass_wavelength_scale.textEdited.connect(self._clear_pending_legacy_cutoff)
         self.constant_bkg = QtWidgets.QLineEdit("0")
         self.filter_axis = QtWidgets.QComboBox()
         self.filter_axis.addItems(["wavelength", "delay", "both"])
@@ -293,7 +330,8 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         add_pair(4, "noise_filter", self.noise_filter)
         add_pair(5, "filter_axis", self.filter_axis)
         add_pair(6, "sigma (Gaussian)", self.sigma)
-        add_pair(7, "cutoff ratio (Low pass)", self.cutoff)
+        add_pair(7, "LP delay scale (fs)", self.lowpass_delay_scale)
+        add_pair(8, "LP wavelength scale (nm)", self.lowpass_wavelength_scale)
 
         self.delay_step = QtWidgets.QComboBox()
         self.delay_step.addItems(["fs", "mm", "nm", "um", "m", "ps", "as"])
@@ -308,25 +346,43 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.mask_frg.setPlaceholderText("None")
         self.time_zero = QtWidgets.QCheckBox("time_zero")
         self.time_zero.setChecked(True)
-        add_pair(8, "delay_step", self.delay_step)
-        add_pair(9, "delay_correction", self.delay_correction)
-        add_pair(10, "edge pixels", self.edge)
-        add_pair(11, "constant_bkg", self.constant_bkg)
-        add_pair(12, "mask_frg", self.mask_frg)
-        add_check(13, self.time_zero)
-        add_check(14, self.corner_suppression)
-        add_check(15, self.subx)
-        add_check(16, self.suby)
+        add_pair(9, "delay_step", self.delay_step)
+        add_pair(10, "delay_correction", self.delay_correction)
+        add_pair(11, "edge pixels", self.edge)
+        add_pair(12, "constant_bkg", self.constant_bkg)
+        add_pair(13, "mask_frg", self.mask_frg)
+        add_check(14, self.time_zero)
+        add_check(15, self.corner_suppression)
+        add_check(16, self.subx)
+        add_check(17, self.suby)
 
-        self.time_enable = QtWidgets.QCheckBox("time_range")
+        self.time_enable = QtWidgets.QCheckBox("delay range")
         self.time_enable.setChecked(False)
         self.time_min = QtWidgets.QLineEdit("-900")
         self.time_max = QtWidgets.QLineEdit("900")
         self.N = QtWidgets.QLineEdit("256")
-        add_check(17, self.time_enable)
-        add_pair(18, "time_min", self.time_min)
-        add_pair(19, "time_max", self.time_max)
-        add_pair(20, "N", self.N)
+        self.time_enable.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            self.time_enable.sizePolicy().verticalPolicy(),
+        )
+        g.addWidget(self.time_enable, 18, 0)
+        time_limits_widget = QtWidgets.QWidget()
+        time_limits_layout = QtWidgets.QHBoxLayout(time_limits_widget)
+        time_limits_layout.setContentsMargins(0, 0, 0, 0)
+        time_limits_layout.setSpacing(4)
+        time_limits_layout.addWidget(self.time_min, 1)
+        time_limits_layout.addWidget(self.time_max, 1)
+        add_input(18, time_limits_widget)
+        add_pair(19, "N", self.N)
+
+        param_file_layout = QtWidgets.QHBoxLayout()
+        self.load_param_btn = QtWidgets.QPushButton("Load Param")
+        self.save_param_btn = QtWidgets.QPushButton("Save Param")
+        self.load_param_btn.clicked.connect(self.load_params_file)
+        self.save_param_btn.clicked.connect(self.save_params_file)
+        param_file_layout.addWidget(self.load_param_btn)
+        param_file_layout.addWidget(self.save_param_btn)
+        left_layout.addLayout(param_file_layout)
 
         self.save_default_param_btn = QtWidgets.QPushButton("Save Default Param")
         self.save_default_param_btn.clicked.connect(self.save_default_params)
@@ -342,8 +398,6 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.reload_btn = QtWidgets.QPushButton("Reload")
         self.process_btn = QtWidgets.QPushButton("Run convert")
         self.process_btn.setStyleSheet("background-color: #90EE90;")
-        self.load_param_btn = QtWidgets.QPushButton("Load Param")
-        self.save_param_btn = QtWidgets.QPushButton("Save Param")
         self.save_btn = QtWidgets.QPushButton("Save Convert")
         self.save_auto_btn = QtWidgets.QPushButton("Save Autocorrelation")
         file_layout.addWidget(self.open_btn)
@@ -351,24 +405,32 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         self.open_btn.clicked.connect(self.open_file)
         self.reload_btn.clicked.connect(self.reload_raw)
         self.process_btn.clicked.connect(self.process)
-        self.load_param_btn.clicked.connect(self.load_params_file)
-        self.save_param_btn.clicked.connect(self.save_params_file)
         self.save_btn.clicked.connect(self.save_results_dialog)
         self.save_auto_btn.clicked.connect(self.save_autocorrelation_dialog)
 
         logs_layout = QtWidgets.QHBoxLayout()
         right_layout.addLayout(logs_layout)
         self.trace_log = QtWidgets.QCheckBox("Trace log scale")
-        self.trace_log.setChecked(False)
+        self.trace_log.setChecked(True)
         self.show_1d_btn = QtWidgets.QPushButton("show 1d")
+        action_button_width = self.save_auto_btn.sizeHint().width()
+        for button in (
+            self.show_1d_btn,
+            self.process_btn,
+            self.save_btn,
+            self.save_auto_btn,
+        ):
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            button.setFixedWidth(action_button_width)
         logs_layout.addWidget(self.trace_log)
+        logs_layout.addStretch(1)
         logs_layout.addWidget(self.show_1d_btn)
-        logs_layout.addWidget(self.load_param_btn)
-        logs_layout.addWidget(self.save_param_btn)
         logs_layout.addWidget(self.process_btn)
         logs_layout.addWidget(self.save_btn)
         logs_layout.addWidget(self.save_auto_btn)
-        #logs_layout.addStretch(1)
         self.trace_log.toggled.connect(self.redraw)
         self.show_1d_btn.clicked.connect(self.show_1d_dialog)
 
@@ -396,17 +458,63 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
             return None
         return float(min_edit.text().strip()), float(max_edit.text().strip())
 
+    @staticmethod
+    def _read_optional_positive(edit: QtWidgets.QLineEdit, label: str):
+        text = edit.text().strip()
+        if not text:
+            return None
+        value = float(text)
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{label} must be a positive number.")
+        return value
+
+    def _clear_pending_legacy_cutoff(self, *_):
+        self._pending_legacy_cutoff = None
+        self._legacy_cutoff_conversion_error = None
+
+    @staticmethod
+    def _format_lowpass_scale(value):
+        return f"{float(value):.8g}"
+
+    def _resolve_pending_legacy_cutoff(self):
+        if self._pending_legacy_cutoff is None or self.raw_obj is None:
+            return False
+        try:
+            delay_scale, wavelength_scale = legacy_cutoff_to_scales(
+                getattr(self.raw_obj, "delay", []),
+                getattr(self.raw_obj, "wavelength", []),
+                getattr(self.raw_obj, "frog_trace", []),
+                self._pending_legacy_cutoff,
+            )
+            self.lowpass_delay_scale.setText(
+                self._format_lowpass_scale(delay_scale)
+            )
+            self.lowpass_wavelength_scale.setText(
+                self._format_lowpass_scale(wavelength_scale)
+            )
+            self._pending_legacy_cutoff = None
+            self._legacy_cutoff_conversion_error = None
+            return True
+        except Exception as exc:
+            self._legacy_cutoff_conversion_error = str(exc)
+            return False
+
     def _collect_params(self):
         mask_text = self.mask_frg.text().strip()
         mask_frg = None if mask_text == "" else float(mask_text)
         constant_text = self.constant_bkg.text().strip()
         constant_bkg = float(constant_text) if constant_text else 0.0
-        return {
+        params = {
             "wavelength_range": self._read_range(self.range_enable, self.wavelength_min, self.wavelength_max),
             "wavelength_bin": int(self.wavelength_bin.text().strip()),
             "noise_filter": self.noise_filter.currentText(),
             "sigma": float(self.sigma.text().strip()),
-            "cutoff": float(self.cutoff.text().strip()),
+            "lowpass_delay_scale": self._read_optional_positive(
+                self.lowpass_delay_scale, "Low-pass delay scale"
+            ),
+            "lowpass_wavelength_scale": self._read_optional_positive(
+                self.lowpass_wavelength_scale, "Low-pass wavelength scale"
+            ),
             "constant_bkg": constant_bkg,
             "filter_axis": self.filter_axis.currentText(),
             "delay_step": self.delay_step.currentText(),  # default fs
@@ -420,6 +528,14 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
             "time_range": self._read_range(self.time_enable, self.time_min, self.time_max),
             "N": int(self.N.text().strip()),
         }
+        if (
+            self._pending_legacy_cutoff is not None
+            and params["lowpass_delay_scale"] is None
+            and params["lowpass_wavelength_scale"] is None
+        ):
+            # Preserve an old setting until data is available for exact conversion.
+            params["cutoff"] = float(self._pending_legacy_cutoff)
+        return params
 
     def _apply_params(self, p):
         if "wavelength_range" in p:
@@ -436,8 +552,36 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                 self.noise_filter.setCurrentIndex(idx)
         if "sigma" in p:
             self.sigma.setText(str(p["sigma"]))
-        if "cutoff" in p:
-            self.cutoff.setText(str(p["cutoff"]))
+        has_new_lowpass_scales = (
+            "lowpass_delay_scale" in p or "lowpass_wavelength_scale" in p
+        )
+        if has_new_lowpass_scales:
+            delay_scale = p.get("lowpass_delay_scale")
+            wavelength_scale = p.get("lowpass_wavelength_scale")
+            self.lowpass_delay_scale.setText(
+                "" if delay_scale is None else str(delay_scale)
+            )
+            self.lowpass_wavelength_scale.setText(
+                "" if wavelength_scale is None else str(wavelength_scale)
+            )
+            self._clear_pending_legacy_cutoff()
+        else:
+            legacy_cutoff = next(
+                (
+                    p[key]
+                    for key in ("cutoff", "cutoff_ratio", "cutoff ratio")
+                    if key in p and p[key] is not None
+                ),
+                None,
+            )
+            if legacy_cutoff is not None:
+                legacy_cutoff = float(legacy_cutoff)
+                if not np.isfinite(legacy_cutoff) or legacy_cutoff <= 0:
+                    raise ValueError("Legacy cutoff ratio must be positive.")
+                self.lowpass_delay_scale.clear()
+                self.lowpass_wavelength_scale.clear()
+                self._pending_legacy_cutoff = legacy_cutoff
+                self._legacy_cutoff_conversion_error = None
         if "constant_bkg" in p:
             self.constant_bkg.setText(str(p["constant_bkg"]))
         if "filter_axis" in p:
@@ -481,7 +625,23 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
         if not isinstance(p, dict):
             raise ValueError("Parameter file must be a JSON object.")
         self._apply_params(p)
-        self._status_info(f"Loaded parameters: {param_path}")
+        legacy_pending = self._pending_legacy_cutoff is not None
+        if legacy_pending and (
+            self._raw_source is not None or self.file_edit.text().strip()
+        ):
+            self._reload_raw_with_current_params()
+        elif legacy_pending:
+            self._resolve_pending_legacy_cutoff()
+
+        if legacy_pending and self._pending_legacy_cutoff is None:
+            suffix = " | Legacy cutoff converted to delay/wavelength scales."
+        elif self._pending_legacy_cutoff is not None:
+            suffix = " | Legacy cutoff conversion pending until data is loaded."
+            if self._legacy_cutoff_conversion_error:
+                suffix += f" ({self._legacy_cutoff_conversion_error})"
+        else:
+            suffix = ""
+        self._status_info(f"Loaded parameters: {param_path}{suffix}")
 
     def _autoload_default_params(self):
         param_path = self._default_param_path()
@@ -514,10 +674,8 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                     prefix = os.path.splitext(os.path.abspath(file_path))[0]
                 else:
                     prefix = os.path.join(self.last_dir, "frog_convert")
-            source_dir = os.path.dirname(os.path.abspath(prefix))
-            retrieval_dir = os.path.join(source_dir, "retrieval_result")
+            retrieval_dir, save_prefix = build_retrieval_save_prefix(prefix)
             os.makedirs(retrieval_dir, exist_ok=True)
-            save_prefix = os.path.join(retrieval_dir, os.path.basename(prefix))
             param_path = f"{save_prefix}_param.json"
             with open(param_path, "w", encoding="utf-8") as f:
                 json.dump(self._collect_params(), f, indent=2, ensure_ascii=True)
@@ -572,10 +730,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                 prefix = os.path.splitext(os.path.abspath(file_path))[0]
             else:
                 prefix = os.path.join(self.last_dir, "frog_convert")
-        source_dir = os.path.dirname(os.path.abspath(prefix))
-        retrieval_dir = os.path.join(source_dir, "retrieval_result")
-        save_prefix = os.path.join(retrieval_dir, os.path.basename(prefix))
-        return retrieval_dir, save_prefix
+        return build_retrieval_save_prefix(prefix)
 
     @staticmethod
     def _strip_generated_suffixes(path):
@@ -672,6 +827,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                 time_range=p["time_range"],
                 raw=True,
             )
+            self._resolve_pending_legacy_cutoff()
             self.redraw()
             if hasattr(self, "one_d_dialog") and self.one_d_dialog is not None:
                 self.one_d_dialog.refresh_options()
@@ -725,10 +881,21 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                 "frog_trace": raw_trace.copy(),
                 "prefix": str(getattr(self.raw_obj, "prefix", "frog")),
             }
+            converted_legacy_cutoff = self._resolve_pending_legacy_cutoff()
             self.redraw()
             if hasattr(self, "one_d_dialog") and self.one_d_dialog is not None:
                 self.one_d_dialog.refresh_options()
-            self._status_info(f"Raw loaded: {path}")
+            if converted_legacy_cutoff:
+                self._status_info(
+                    f"Raw loaded: {path} | Legacy cutoff converted to delay/wavelength scales."
+                )
+            elif self._legacy_cutoff_conversion_error:
+                self._status_warn(
+                    f"Raw loaded, but legacy cutoff conversion failed: "
+                    f"{self._legacy_cutoff_conversion_error}"
+                )
+            else:
+                self._status_info(f"Raw loaded: {path}")
         except Exception as e:
             self._reset_cached_state()
             self._status_error(f"Load error: {e}")
@@ -761,6 +928,7 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
             delay_correction=1.0,
             raw=True,
         )
+        self._resolve_pending_legacy_cutoff()
         self.file_edit.setText(f"[simulated, {delay.size} pts]")
         self.redraw()
         if hasattr(self, "one_d_dialog") and self.one_d_dialog is not None:
@@ -783,7 +951,9 @@ class FROGConvertGUI(QtWidgets.QMainWindow):
                 wavelength_bin=p["wavelength_bin"],
                 noise_filter=p["noise_filter"],
                 sigma=p["sigma"],
-                cutoff=p["cutoff"],
+                cutoff=None,
+                lowpass_delay_scale=p["lowpass_delay_scale"],
+                lowpass_wavelength_scale=p["lowpass_wavelength_scale"],
                 constant_bkg=p["constant_bkg"],
                 filter_axis=p["filter_axis"],
                 delay_step=p["delay_step"],

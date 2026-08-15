@@ -50,6 +50,7 @@ class RetrievalConfig:
     Shared:
     - ``verbose``, ``rng_seed``
     - ``progress_callback``, ``progress_interval``, ``stop_requested``
+    - ``delay_smearing``: optional Gaussian FWHM along delay, in fs
 
     RANA-only:
     - ``rana_g_cutoff``, ``rana_gp_cutoff``
@@ -63,6 +64,7 @@ class RetrievalConfig:
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     progress_interval: int = 1
     stop_requested: Optional[Callable[[], bool]] = None
+    delay_smearing: Optional[float] = None
 
     # RANA-only options
     rana_g_cutoff: float = 1e-3

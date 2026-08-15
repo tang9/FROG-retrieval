@@ -15,6 +15,7 @@ from PySide6 import QtCore, QtWidgets
 
 from .api import retrieve_pulse
 from .types import RetrievalConfig, RetrievalResult
+from .output_paths import build_retrieval_save_prefix
 from .common import (
     custom_cmap,
     find_peak_fwhm,
@@ -390,6 +391,7 @@ class RetrievalWorker(QtCore.QObject):
 class FrogRetrievalGUI(QtWidgets.QMainWindow):
     """Main window for FROG retrieval."""
     result_data_ready = QtCore.Signal(object)
+    retrieval_failed = QtCore.Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -559,9 +561,32 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
         self.rana_weight_factor = QtWidgets.QLineEdit("1.0")
         add_param("Zero-pixel weight factor", self.rana_weight_factor)
 
+        self.delay_smearing_enable = QtWidgets.QCheckBox("delay_smearing (fs)")
+        self.delay_smearing_value = QtWidgets.QLineEdit("0.0")
+        self.delay_smearing_value.setMaximumWidth(80)
+        self.delay_smearing_value.setEnabled(False)
+        self.delay_smearing_value.setToolTip(
+            "Gaussian FWHM of the instrument response along the delay axis, in fs."
+        )
+        self.delay_smearing_enable.setToolTip(
+            "Apply delay-axis smearing to calculated traces before error evaluation."
+        )
+        self.delay_smearing_enable.toggled.connect(
+            self.delay_smearing_value.setEnabled
+        )
+        self.delay_smearing_control = QtWidgets.QWidget()
+        delay_smearing_layout = QtWidgets.QHBoxLayout(
+            self.delay_smearing_control
+        )
+        delay_smearing_layout.setContentsMargins(0, 0, 0, 0)
+        delay_smearing_layout.setSpacing(2)
+        delay_smearing_layout.addWidget(self.delay_smearing_enable)
+        delay_smearing_layout.addWidget(self.delay_smearing_value)
+        add_param("", self.delay_smearing_control)
+
         param_layout.addWidget(param_group)
 
-        self._shared_param_widgets = []
+        self._shared_param_widgets = [self.delay_smearing_control]
         self._rana_param_widgets = [
             self.rana_g_cutoff,
             self.rana_gp_cutoff,
@@ -714,8 +739,16 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
 
     def _collect_config_dict(self) -> dict:
         base = {}
+        delay_smearing = None
+        if self.delay_smearing_enable.isChecked():
+            delay_smearing = self._parse_float(
+                self.delay_smearing_value, "delay_smearing"
+            )
+            if not np.isfinite(delay_smearing) or delay_smearing < 0:
+                raise ValueError("delay_smearing must be a non-negative value in fs.")
         base.update(
             {
+                "delay_smearing": delay_smearing,
                 "rana_g_cutoff": self._parse_float(self.rana_g_cutoff, "rana_g_cutoff"),
                 "rana_gp_cutoff": self._parse_float(self.rana_gp_cutoff, "rana_gp_cutoff"),
                 "rana_full_iter_cap": int(self.rana_full_iter_cap.value()),
@@ -1147,6 +1180,7 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def _on_worker_failed(self, err_text: str) -> None:
         self._set_status("Retrieval failed.", timeout_ms=12000)
+        self.retrieval_failed.emit(str(err_text))
         QtWidgets.QMessageBox.critical(self, "Retrieval Failed", err_text)
 
     def _suggest_save_prefix(self) -> str:
@@ -1340,10 +1374,8 @@ class FrogRetrievalGUI(QtWidgets.QMainWindow):
             prefix = self._suggest_save_prefix()
             if not prefix:
                 raise ValueError("Save prefix cannot be empty.")
-            source_dir = os.path.dirname(os.path.abspath(prefix))
-            retrieval_dir = os.path.join(source_dir, "retrieval_result")
+            retrieval_dir, save_prefix = build_retrieval_save_prefix(prefix)
             os.makedirs(retrieval_dir, exist_ok=True)
-            save_prefix = os.path.join(retrieval_dir, os.path.basename(prefix))
 
             field = np.asarray(self.result.field, dtype=np.complex128)
             profiles = self._build_export_profiles(field)

@@ -1,12 +1,13 @@
 {
   "wavelength_range": [
-    200.0,
+    1050.0,
     1200.0
   ],
   "wavelength_bin": 1,
   "noise_filter": "Low_pass",
   "sigma": 1.0,
-  "cutoff": 10.0,
+  "lowpass_delay_scale": 30.0,
+  "lowpass_wavelength_scale": 5.0,
   "constant_bkg": 0.0,
   "filter_axis": "both",
   "delay_step": "fs",
@@ -15,7 +16,7 @@
   "subx": true,
   "suby": false,
   "corner_suppression": false,
-  "mask_frg": null,
+  "mask_frg": 0.0005,
   "time_zero": true,
   "time_range": null,
   "N": 256

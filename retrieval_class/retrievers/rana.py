@@ -74,6 +74,7 @@ import warnings
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator, RegularGridInterpolator
+from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks, savgol_filter
 
 from ..field2trace import normalize_geometry_name, probe_gate_from_field
@@ -379,9 +380,129 @@ def _mag_repl(esig: Array, asig: Array, weights: Array) -> Array:
     return w * target + (1.0 - w) * es
 
 
-def _min_gerr(esig: Array, asig: Array, weights: Array) -> tuple[float, float]:
+def _delay_smear_intensity(
+    intensity: Array,
+    sigma_samples: float,
+    axis: int,
+) -> Array:
+    values = np.asarray(intensity, dtype=np.float64)
+    sigma = float(sigma_samples)
+    if not np.isfinite(sigma) or sigma <= 1e-12:
+        return values
+    return gaussian_filter1d(
+        values,
+        sigma=sigma,
+        axis=axis,
+        mode="constant",
+        cval=0.0,
+    )
+
+
+def _delay_smearing_sigma_samples(delay_axis: Array, fwhm_fs: float) -> float:
+    """Convert a Gaussian FWHM in fs to sigma in delay-axis samples."""
+    fwhm = float(fwhm_fs)
+    if fwhm <= 0.0:
+        return 0.0
+    delay = np.asarray(delay_axis, dtype=np.float64).ravel()
+    if delay.size < 2:
+        return 0.0
+    spacing = float(np.mean(np.abs(np.diff(delay))))
+    if not np.isfinite(spacing) or spacing <= 0.0:
+        raise ValueError("Delay axis spacing must be finite and positive for delay smearing.")
+    return fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)) * spacing)
+
+
+def _model_trace_intensity(esig: Array, delay_smearing_sigma: float = 0.0) -> Array:
+    intensity = np.abs(np.asarray(esig, dtype=np.complex128)) ** 2
+    # Internal RANA layout is [frequency, delay].
+    return _delay_smear_intensity(intensity, delay_smearing_sigma, axis=1)
+
+
+@dataclass(frozen=True)
+class _TraceErrorContext:
+    measured_intensity: Array
+    weights: Array
+    measured_peak: float
+    pixel_norm: float
+    gprime_denominator: float
+
+
+def _trace_error_context(asig: Array, weights: Array) -> _TraceErrorContext:
+    measured_intensity = np.abs(np.asarray(asig, dtype=np.float64)) ** 2
+    weight_array = np.asarray(weights, dtype=np.float64)
+    return _TraceErrorContext(
+        measured_intensity=measured_intensity,
+        weights=weight_array,
+        measured_peak=float(np.max(measured_intensity)),
+        pixel_norm=float(np.sqrt(measured_intensity.size)),
+        gprime_denominator=float(
+            np.trapezoid(
+                np.trapezoid(
+                    weight_array * (measured_intensity ** 2),
+                    axis=0,
+                ),
+                axis=0,
+            )
+        ),
+    )
+
+
+def _g_gprime_from_model_intensity(
+    model_intensity: Array,
+    context: _TraceErrorContext,
+) -> tuple[float, float, float]:
+    model = np.asarray(model_intensity, dtype=np.float64)
+    measured = context.measured_intensity
+    weights = context.weights
+    denominator = float(np.sum(weights * model * model))
+    if denominator <= 1e-30:
+        return float("inf"), float("inf"), 0.0
+
+    scale = float(np.sum(weights * model * measured) / denominator)
+    residual = measured - scale * model
+    weighted_square_error = weights * residual * residual
+    if context.measured_peak <= 1e-30:
+        g = 0.0
+    elif context.pixel_norm <= 0.0:
+        g = float("inf")
+    else:
+        g = float(
+            np.sqrt(np.sum(weighted_square_error))
+            / context.measured_peak
+            / context.pixel_norm
+        )
+
+    if context.gprime_denominator <= 1e-30:
+        gp = float("inf")
+    else:
+        numerator = float(
+            np.trapezoid(
+                np.trapezoid(weighted_square_error, axis=0),
+                axis=0,
+            )
+        )
+        ratio = numerator / context.gprime_denominator
+        gp = float(np.sqrt(ratio)) if ratio > 0.0 else 0.0
+    return float(g), float(gp), float(scale)
+
+
+def _g_gprime_from_esig(
+    esig: Array,
+    context: _TraceErrorContext,
+    delay_smearing_sigma: float = 0.0,
+) -> tuple[float, float, float]:
+    model_intensity = _model_trace_intensity(esig, delay_smearing_sigma)
+    return _g_gprime_from_model_intensity(model_intensity, context)
+
+
+def _min_gerr(
+    esig: Array,
+    asig: Array,
+    weights: Array,
+    delay_smearing_sigma: float = 0.0,
+) -> tuple[float, float]:
     """Return (G, scale) where scale minimizes G."""
-    e2 = np.abs(np.asarray(esig, dtype=np.complex128)) ** 2
+    e2 = _model_trace_intensity(esig, delay_smearing_sigma)
     a2 = np.abs(np.asarray(asig, dtype=np.float64)) ** 2
     w = np.asarray(weights, dtype=np.float64)
     denom = float(np.sum(w * e2 * e2))
@@ -398,10 +519,17 @@ def _min_gerr(esig: Array, asig: Array, weights: Array) -> tuple[float, float]:
     return g, scale
 
 
-def _gprime_from_amp(asig: Array, esig: Array, scale: float, weights: Array) -> float:
+def _gprime_from_amp(
+    asig: Array,
+    esig: Array,
+    scale: float,
+    weights: Array,
+    delay_smearing_sigma: float = 0.0,
+) -> float:
     a = np.asarray(asig, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)
-    diff = np.abs(a ** 2 - scale * (np.abs(esig) ** 2)) ** 2
+    model_intensity = _model_trace_intensity(esig, delay_smearing_sigma)
+    diff = np.abs(a ** 2 - scale * model_intensity) ** 2
     num = float(np.trapezoid(np.trapezoid(w * diff, axis=0), axis=0))
     den = float(np.trapezoid(np.trapezoid(w * (a ** 4), axis=0), axis=0))
     if den <= 1e-30:
@@ -410,36 +538,107 @@ def _gprime_from_amp(asig: Array, esig: Array, scale: float, weights: Array) -> 
     return float(np.sqrt(val)) if val > 0 else 0.0
 
 
-def _g_gprime_error(asig: Array, et: Array, weights: Array, kernel: _GeometryKernel) -> tuple[float, float]:
+def _g_gprime_error(
+    asig: Array,
+    et: Array,
+    weights: Array,
+    kernel: _GeometryKernel,
+    delay_smearing_sigma: float = 0.0,
+) -> tuple[float, float]:
     """Return (G, G') for a given field."""
     esig = _fftc(kernel.calc_esig(et), axis=0)
-    g, a = _min_gerr(esig, asig, weights=weights)
+    g, gp, _ = _g_gprime_from_esig(
+        esig,
+        _trace_error_context(asig, weights),
+        delay_smearing_sigma=delay_smearing_sigma,
+    )
     if not np.isfinite(g):
         return float("inf"), float("inf")
-    gp = _gprime_from_amp(asig, esig, a, weights=weights)
     return float(g), float(gp)
 
 
-def _g_error(asig: Array, et: Array, weights: Array, kernel: _GeometryKernel) -> float:
-    g, _ = _g_gprime_error(asig, et, weights=weights, kernel=kernel)
+def _g_error(
+    asig: Array,
+    et: Array,
+    weights: Array,
+    kernel: _GeometryKernel,
+    delay_smearing_sigma: float = 0.0,
+) -> float:
+    g, _ = _g_gprime_error(
+        asig,
+        et,
+        weights=weights,
+        kernel=kernel,
+        delay_smearing_sigma=delay_smearing_sigma,
+    )
     return float(g)
 
 
-def _gprime_error(asig: Array, et: Array, weights: Array, kernel: _GeometryKernel) -> float:
-    _, gp = _g_gprime_error(asig, et, weights=weights, kernel=kernel)
+def _gprime_error(
+    asig: Array,
+    et: Array,
+    weights: Array,
+    kernel: _GeometryKernel,
+    delay_smearing_sigma: float = 0.0,
+) -> float:
+    _, gp = _g_gprime_error(
+        asig,
+        et,
+        weights=weights,
+        kernel=kernel,
+        delay_smearing_sigma=delay_smearing_sigma,
+    )
     return float(gp)
 
 
-def _g_gprime_error_fast(asig: Array, et: Array, weights: Array, kernel: _GeometryKernel) -> tuple[float, float]:
+def _g_gprime_error_fast(
+    asig: Array,
+    et: Array,
+    weights: Array,
+    kernel: _GeometryKernel,
+    delay_smearing_sigma: float = 0.0,
+) -> tuple[float, float]:
     if HAS_RANA_CYTHON:
-        return _g_gprime_error_cy(asig, et, weights, kernel.geometry)
-    return _g_gprime_error(asig, et, weights=weights, kernel=kernel)
+        return _g_gprime_error_cy(
+            asig,
+            et,
+            weights,
+            kernel.geometry,
+            delay_smearing_sigma,
+        )
+    return _g_gprime_error(
+        asig,
+        et,
+        weights=weights,
+        kernel=kernel,
+        delay_smearing_sigma=delay_smearing_sigma,
+    )
 
 
-def _g_error_fast(asig: Array, et: Array, weights: Array, kernel: _GeometryKernel) -> float:
+def _g_error_fast(
+    asig: Array,
+    et: Array,
+    weights: Array,
+    kernel: _GeometryKernel,
+    delay_smearing_sigma: float = 0.0,
+) -> float:
     if HAS_RANA_CYTHON:
-        return float(_g_error_cy(asig, et, weights, kernel.geometry))
-    return _g_error(asig, et, weights=weights, kernel=kernel)
+        return float(
+            _g_error_cy(
+                asig,
+                et,
+                weights,
+                kernel.geometry,
+                delay_smearing_sigma,
+            )
+        )
+    return _g_error(
+        asig,
+        et,
+        weights=weights,
+        kernel=kernel,
+        delay_smearing_sigma=delay_smearing_sigma,
+    )
 
 
 def _pixel_weights(asig: Array, weight_factor: float = DEFAULT_WEIGHT_FACTOR) -> Array:
@@ -449,6 +648,61 @@ def _pixel_weights(asig: Array, weight_factor: float = DEFAULT_WEIGHT_FACTOR) ->
     weights = np.full_like(a, weight_factor)
     weights[nonzero] = 1.0
     return weights
+
+
+def _signal_polynomial_terms(
+    e_t: Array,
+    e_tp: Array,
+    d_t: Array,
+    d_tp: Array,
+    geometry: str,
+) -> tuple[Array, ...]:
+    """Return vectorized signal-polynomial terms for one delay shift."""
+    if geometry == "shg-frog":
+        return (
+            e_t * e_tp,
+            d_t * e_tp + e_t * d_tp,
+            d_t * d_tp,
+        )
+    if geometry == "pg-frog":
+        c0 = np.abs(e_tp) ** 2
+        c1 = 2.0 * np.real(d_tp * np.conj(e_tp))
+        c2 = np.abs(d_tp) ** 2
+        return (
+            e_t * c0,
+            d_t * c0 + e_t * c1,
+            d_t * c1 + e_t * c2,
+            d_t * c2,
+        )
+    if geometry == "thg-frog":
+        return (
+            e_t * e_tp * e_tp,
+            2.0 * e_t * e_tp * d_tp + d_t * e_tp * e_tp,
+            e_t * d_tp * d_tp + 2.0 * d_t * e_tp * d_tp,
+            d_t * d_tp * d_tp,
+        )
+    if geometry == "sd-frog":
+        conjugate_e_t = np.conj(e_t)
+        conjugate_d_t = np.conj(d_t)
+        return (
+            conjugate_e_t * e_tp * e_tp,
+            2.0 * conjugate_e_t * e_tp * d_tp
+            + conjugate_d_t * e_tp * e_tp,
+            conjugate_e_t * d_tp * d_tp
+            + 2.0 * conjugate_d_t * e_tp * d_tp,
+            conjugate_d_t * d_tp * d_tp,
+        )
+    raise ValueError(f"Unsupported FROG geometry '{geometry}'.")
+
+
+def _accumulate_polynomial_error(coeff: Array, terms: tuple[Array, ...]) -> None:
+    """Accumulate sum(poly * conj(poly)) without per-pixel convolutions."""
+    for first, first_term in enumerate(terms):
+        coeff[2 * first] += float(np.vdot(first_term, first_term).real)
+        for second in range(first + 1, len(terms)):
+            coeff[first + second] += 2.0 * float(
+                np.vdot(first_term, terms[second]).real
+            )
 
 
 def _min_zerr(esig: Array, et: Array, dz: Array, kernel: _GeometryKernel) -> tuple[Array, float]:
@@ -462,24 +716,38 @@ def _min_zerr(esig: Array, et: Array, dz: Array, kernel: _GeometryKernel) -> tup
     if mx <= 1e-30:
         return e.copy(), 0.0
 
-    coeff = np.zeros(2 * (len(kernel.signal_coeffs(1.0 + 0.0j, 1.0 + 0.0j, 1.0 + 0.0j, 1.0 + 0.0j)) - 1) + 1, dtype=np.float64)
-    shifts = np.arange(-n // 2, n // 2, dtype=np.int64)
+    term_count = 3 if kernel.geometry == "shg-frog" else 4
+    coeff = np.zeros(2 * term_count - 1, dtype=np.float64)
 
-    for j, s in enumerate(shifts):
-        if s >= 0:
-            t = np.arange(s, n, dtype=np.int64)
-            tp = t - s
+    for j, shift in enumerate(range(-n // 2, n // 2)):
+        if shift >= 0:
+            e_t = e[shift:]
+            e_tp = e[: n - shift]
+            d_t = d[shift:]
+            d_tp = d[: n - shift]
+            measured_signal = es[shift:, j]
         else:
-            t = np.arange(0, n + s, dtype=np.int64)
-            tp = t - s
+            offset = -shift
+            e_t = e[: n - offset]
+            e_tp = e[offset:]
+            d_t = d[: n - offset]
+            d_tp = d[offset:]
+            measured_signal = es[: n - offset, j]
 
-        if not t.size:
+        if not e_t.size:
             continue
 
-        for tt, ttp in zip(t, tp):
-            poly = np.asarray(kernel.signal_coeffs(e[tt], e[ttp], d[tt], d[ttp]), dtype=np.complex128)
-            poly[0] -= es[tt, j]
-            coeff += np.convolve(poly, np.conj(poly)).real
+        terms = list(
+            _signal_polynomial_terms(
+                e_t,
+                e_tp,
+                d_t,
+                d_tp,
+                kernel.geometry,
+            )
+        )
+        terms[0] = terms[0] - measured_signal
+        _accumulate_polynomial_error(coeff, tuple(terms))
 
     scale = float(es.size) * mx
     coeff /= max(scale, 1e-30)
@@ -890,13 +1158,32 @@ def _initial_spectra_from_marginal(mw: Array, geometry: str, max_keep: int) -> A
     return np.tile(mw_arr[None, :], (keep, 1))
 
 
-def _compare_gerror(ew_int: Array, asig_amp: Array, weights: Array, kernel: _GeometryKernel) -> float:
+def _compare_gerror(
+    ew_int: Array,
+    asig_amp: Array,
+    weights: Array,
+    kernel: _GeometryKernel,
+    delay_smearing_sigma: float = 0.0,
+) -> float:
     if HAS_RANA_CYTHON:
-        return float(_compare_gerror_cy(ew_int, asig_amp, weights, kernel.geometry))
+        return float(
+            _compare_gerror_cy(
+                ew_int,
+                asig_amp,
+                weights,
+                kernel.geometry,
+                delay_smearing_sigma,
+            )
+        )
     field = _ifftc(np.asarray(ew_int, dtype=np.complex128), axis=0)
     esig = _fftc(kernel.calc_esig(field), axis=0)
     asig_wt = _quickscale(np.abs(esig))
-    g, _ = _min_gerr(asig_wt, asig_amp, weights=weights)
+    g, _ = _min_gerr(
+        asig_wt,
+        asig_amp,
+        weights=weights,
+        delay_smearing_sigma=delay_smearing_sigma,
+    )
     return float(g)
 
 
@@ -910,6 +1197,7 @@ def _promote_initial_guesses(
     isig_next_weights: Array,
     total_next: int,
     kernel: _GeometryKernel,
+    delay_smearing_sigma: float = 0.0,
 ) -> Array:
     e_arr = np.asarray(e_out, dtype=np.complex128)
     m_arr = np.asarray(measure, dtype=np.float64)
@@ -939,13 +1227,25 @@ def _promote_initial_guesses(
         # Convention: E = sqrt(I) * exp(-i*phase)
         phase = -np.angle(ew_b)
         phase_factor = np.exp(-1j * phase)
-        rms_b = _compare_gerror(ew_b, isig_next_amp, weights=isig_next_weights, kernel=kernel)
+        rms_b = _compare_gerror(
+            ew_b,
+            isig_next_amp,
+            weights=isig_next_weights,
+            kernel=kernel,
+            delay_smearing_sigma=delay_smearing_sigma,
+        )
 
         best_alt = None
         best_rms = float("inf")
         for ii in range(num_spec):
             candidate = spec_amp[ii, :] * phase_factor
-            rms_candidate = _compare_gerror(candidate, isig_next_amp, weights=isig_next_weights, kernel=kernel)
+            rms_candidate = _compare_gerror(
+                candidate,
+                isig_next_amp,
+                weights=isig_next_weights,
+                kernel=kernel,
+                delay_smearing_sigma=delay_smearing_sigma,
+            )
             if rms_candidate < best_rms:
                 best_rms = float(rms_candidate)
                 best_alt = candidate
@@ -967,9 +1267,11 @@ def _quickfrog_py(
     weights: Array,
     kernel: _GeometryKernel,
     stop_requested: Optional[Callable[[], bool]] = None,
+    delay_smearing_sigma: float = 0.0,
 ) -> tuple[Array, Array, Array, float, float, int, bool, Array]:
     e = np.asarray(et0, dtype=np.complex128).ravel().copy()
     n = int(max(1, max_iter))
+    error_context = _trace_error_context(asig_amp, weights)
 
     g_hist = [float("inf")]
     gp_hist = [float("inf")]
@@ -1003,8 +1305,11 @@ def _quickfrog_py(
         esig = kernel.calc_esig(e)
         esig_w = _fftc(esig, axis=0)
 
-        g, a = _min_gerr(esig_w, asig_amp, weights=weights)
-        gp = _gprime_from_amp(asig_amp, esig_w, a, weights=weights)
+        g, gp, a = _g_gprime_from_esig(
+            esig_w,
+            error_context,
+            delay_smearing_sigma=delay_smearing_sigma,
+        )
 
         if a > 0:
             e = kernel.apply_g_factor(e, a)
@@ -1038,8 +1343,11 @@ def _quickfrog_py(
 
         esig = kernel.calc_esig(e)
         esig_w = _fftc(esig, axis=0)
-        g, a = _min_gerr(esig_w, asig_amp, weights=weights)
-        gp = _gprime_from_amp(asig_amp, esig_w, a, weights=weights)
+        g, gp, a = _g_gprime_from_esig(
+            esig_w,
+            error_context,
+            delay_smearing_sigma=delay_smearing_sigma,
+        )
 
         if a > 0:
             e = kernel.apply_g_factor(e, a)
@@ -1055,10 +1363,22 @@ def _quickfrog_py(
             et_best_gp = e.copy()
 
     if not np.isfinite(g_best):
-        g_best = _g_error(asig_amp, e, weights=weights, kernel=kernel)
+        g_best = _g_error(
+            asig_amp,
+            e,
+            weights=weights,
+            kernel=kernel,
+            delay_smearing_sigma=delay_smearing_sigma,
+        )
         et_best_g = e.copy()
     if not np.isfinite(gp_best):
-        gp_best = _gprime_error(asig_amp, e, weights=weights, kernel=kernel)
+        gp_best = _gprime_error(
+            asig_amp,
+            e,
+            weights=weights,
+            kernel=kernel,
+            delay_smearing_sigma=delay_smearing_sigma,
+        )
         et_best_gp = e.copy()
 
     return (
@@ -1084,6 +1404,7 @@ def _quickfrog(
     weights: Array,
     kernel: _GeometryKernel,
     stop_requested: Optional[Callable[[], bool]] = None,
+    delay_smearing_sigma: float = 0.0,
 ) -> tuple[Array, Array, Array, float, float, int, bool, Array]:
     if HAS_RANA_CYTHON:
         return _quickfrog_cy(
@@ -1097,6 +1418,7 @@ def _quickfrog(
             weights,
             kernel.geometry,
             stop_requested,
+            delay_smearing_sigma,
         )
     return _quickfrog_py(
         asig_amp,
@@ -1109,6 +1431,7 @@ def _quickfrog(
         weights=weights,
         kernel=kernel,
         stop_requested=stop_requested,
+        delay_smearing_sigma=delay_smearing_sigma,
     )
 
 
@@ -1133,11 +1456,22 @@ class RANARetriever(Retriever):
         g_best: float,
         t0: float,
         g_hist: Optional[Array] = None,
+        delay_smearing_sigma: float = 0.0,
     ) -> None:
         if progress_cb is None:
             return
         try:
-            current_trace = np.ascontiguousarray(self.model.simulate_trace(field, grid), dtype=np.float64)
+            current_trace = np.ascontiguousarray(
+                self.model.simulate_trace(field, grid), dtype=np.float64
+            )
+            current_trace = np.ascontiguousarray(
+                _delay_smear_intensity(
+                    current_trace,
+                    delay_smearing_sigma,
+                    axis=0,
+                ),
+                dtype=np.float64,
+            )
             line = f"[RANA] {stage} {iter_num} {idx}/{total} G={g_val:.5g}, best G={g_best:.5g}, t={time.perf_counter() - t0:.2f}s"
             best_payload = None
             if best_field is not None:
@@ -1195,6 +1529,12 @@ class RANARetriever(Retriever):
         stall_abs_full = DEFAULT_STALL_ABS_FULL
         stall_ratio_full = DEFAULT_STALL_RATIO_FULL
         weight_factor = float(getattr(self.config, "rana_weight_factor", DEFAULT_WEIGHT_FACTOR))
+        delay_smearing_fs = getattr(self.config, "delay_smearing", None)
+        if delay_smearing_fs is None:
+            delay_smearing_fs = 0.0
+        delay_smearing_fs = float(delay_smearing_fs)
+        if not np.isfinite(delay_smearing_fs) or delay_smearing_fs < 0.0:
+            raise ValueError("delay_smearing must be a non-negative value in fs.")
 
         i_frog = _quickscale(np.clip(measured, 0.0, None))
         i_frog_mw = i_frog
@@ -1255,6 +1595,9 @@ class RANARetriever(Retriever):
             asig = asig_levels[level]
             weights = weight_levels[level]
             n_init = int(max(1, tot_initial[level]))
+            delay_smearing_sigma = _delay_smearing_sigma_samples(
+                t_levels[level], delay_smearing_fs
+            )
 
             if seed_mat.shape[0] < n_init:
                 reps = int(np.ceil(n_init / seed_mat.shape[0]))
@@ -1278,6 +1621,7 @@ class RANARetriever(Retriever):
                         weights=weights,
                         kernel=kernel,
                         stop_requested=None,
+                        delay_smearing_sigma=delay_smearing_sigma,
                     )
                     e_out[i, :] = etb
                     measure[i] = g
@@ -1300,6 +1644,7 @@ class RANARetriever(Retriever):
                         g_val=float(g),
                         g_best=float(best_g_coarse),
                         t0=start,
+                        delay_smearing_sigma=delay_smearing_sigma,
                     )
 
                 next_total = int(max(1, tot_initial[level - 1]))
@@ -1313,6 +1658,9 @@ class RANARetriever(Retriever):
                     weight_levels[level - 1],
                     next_total,
                     kernel,
+                    delay_smearing_sigma=_delay_smearing_sigma_samples(
+                        t_levels[level - 1], delay_smearing_fs
+                    ),
                 )
             else:
                 iter_total = int(iter_array[0])
@@ -1340,10 +1688,19 @@ class RANARetriever(Retriever):
                             weights=weights,
                             kernel=kernel,
                             stop_requested=None if (first_round and i == 0) else stop_requested,
+                            delay_smearing_sigma=delay_smearing_sigma,
                         )
                         if gp <= gp_cutoff and g > g_cutoff:
                             etb = np.asarray(etbp, dtype=np.complex128)
-                            g = float(_g_error_fast(asig, etb, weights=weights, kernel=kernel))
+                            g = float(
+                                _g_error_fast(
+                                    asig,
+                                    etb,
+                                    weights=weights,
+                                    kernel=kernel,
+                                    delay_smearing_sigma=delay_smearing_sigma,
+                                )
+                            )
                         fields[i, :] = etb
                         g_vals[i] = float(g)
                         iters_done[i] += int(k_it)
@@ -1382,6 +1739,7 @@ class RANARetriever(Retriever):
                             g_best=float(best_g_full),
                             t0=start,
                             g_hist=chunk_best_hist,
+                            delay_smearing_sigma=delay_smearing_sigma,
                         )
 
                     iter_used += cur_chunk
@@ -1402,11 +1760,30 @@ class RANARetriever(Retriever):
             )
 
         field = normalize_field(field_candidate)
-        retrieved_trace = np.ascontiguousarray(self.model.simulate_trace(field, grid), dtype=np.float64)
+        full_delay_smearing_sigma = _delay_smearing_sigma_samples(
+            grid.delay, delay_smearing_fs
+        )
+        retrieved_trace = np.ascontiguousarray(
+            self.model.simulate_trace(field, grid), dtype=np.float64
+        )
+        retrieved_trace = np.ascontiguousarray(
+            _delay_smear_intensity(
+                retrieved_trace,
+                full_delay_smearing_sigma,
+                axis=0,
+            ),
+            dtype=np.float64,
+        )
 
         asig_full = asig_levels[0]
         weights_full = weight_levels[0]
-        g_out, gp_out = _g_gprime_error_fast(asig_full, field, weights=weights_full, kernel=kernel)
+        g_out, gp_out = _g_gprime_error_fast(
+            asig_full,
+            field,
+            weights=weights_full,
+            kernel=kernel,
+            delay_smearing_sigma=full_delay_smearing_sigma,
+        )
 
         return RetrievalResult(
             field=np.ascontiguousarray(field, dtype=np.complex128),
@@ -1421,6 +1798,8 @@ class RANARetriever(Retriever):
                 "rana_cython_enabled": bool(HAS_RANA_CYTHON),
                 "geometry": geometry,
                 "rana_weight_factor": float(weight_factor),
+                "delay_smearing_fs": float(delay_smearing_fs),
+                "delay_smearing_sigma_samples": float(full_delay_smearing_sigma),
                 "rana_zero_pixels": int(
                     np.count_nonzero(~(np.clip(np.asarray(frog_trace.intensity, dtype=np.float64), 0.0, None) > 0.0))
                 ),
