@@ -226,9 +226,21 @@ def _build_spectrum_from_file(freq_rel_phz: np.ndarray, path: str) -> tuple[floa
     return center_freq, _normalize_field(field)
 
 
-def _apply_chirp(freq_rel_phz: np.ndarray, spectrum: np.ndarray, gdd_fs2: float, tod_fs3: float) -> np.ndarray:
+def _apply_chirp(
+    freq_rel_phz: np.ndarray,
+    spectrum: np.ndarray,
+    gdd_fs2: float,
+    tod_fs3: float,
+    fod_fs4: float = 0.0,
+    fifth_fs5: float = 0.0,
+) -> np.ndarray:
     omega = 2.0 * np.pi * np.asarray(freq_rel_phz, dtype=np.float64)
-    phase = 0.5 * float(gdd_fs2) * omega**2 + (1.0 / 6.0) * float(tod_fs3) * omega**3
+    phase = (
+        0.5 * float(gdd_fs2) * omega**2
+        + (1.0 / 6.0) * float(tod_fs3) * omega**3
+        + (1.0 / 24.0) * float(fod_fs4) * omega**4
+        + (1.0 / 120.0) * float(fifth_fs5) * omega**5
+    )
     return np.asarray(spectrum, dtype=np.complex128) * np.exp(-1.0j * phase)
 
 
@@ -616,6 +628,8 @@ class SimulateFrogGUI(QtWidgets.QMainWindow):
         sim_form.setSpacing(4)
         self.gdd_edit = QtWidgets.QLineEdit("0")
         self.tod_edit = QtWidgets.QLineEdit("0")
+        self.fod_edit = QtWidgets.QLineEdit("0")
+        self.fifth_edit = QtWidgets.QLineEdit("0")
         self.noise_edit = QtWidgets.QLineEdit("0")
         self.delay_range_edit = QtWidgets.QLineEdit("250")
         self.n_spin = QtWidgets.QSpinBox()
@@ -624,11 +638,15 @@ class SimulateFrogGUI(QtWidgets.QMainWindow):
         self.n_spin.setValue(256)
         self._set_compact_field_width(self.gdd_edit)
         self._set_compact_field_width(self.tod_edit)
+        self._set_compact_field_width(self.fod_edit)
+        self._set_compact_field_width(self.fifth_edit)
         self._set_compact_field_width(self.noise_edit)
         self._set_compact_field_width(self.delay_range_edit)
         self.n_spin.setMaximumWidth(120)
         sim_form.addWidget(self._build_compact_row("GDD (fs^2)", self.gdd_edit))
         sim_form.addWidget(self._build_compact_row("TOD (fs^3)", self.tod_edit))
+        sim_form.addWidget(self._build_compact_row("FOD (fs^4)", self.fod_edit))
+        sim_form.addWidget(self._build_compact_row("5OD (fs^5)", self.fifth_edit))
         sim_form.addWidget(self._build_compact_row("Noise (%)", self.noise_edit))
         sim_form.addWidget(self._build_compact_row("delay_range (fs)", self.delay_range_edit))
         sim_form.addWidget(self._build_compact_row("N", self.n_spin))
@@ -1089,11 +1107,13 @@ class SimulateFrogGUI(QtWidgets.QMainWindow):
 
         gdd_fs2 = self._parse_float(self.gdd_edit, "GDD")
         tod_fs3 = self._parse_float(self.tod_edit, "TOD")
+        fod_fs4 = self._parse_float(self.fod_edit, "FOD")
+        fifth_fs5 = self._parse_float(self.fifth_edit, "5OD")
         noise_percent = self._parse_float(self.noise_edit, "Noise")
         if noise_percent < 0:
             raise ValueError("Noise must be >= 0.")
 
-        field_f = _apply_chirp(freq_rel, seed_field_f, gdd_fs2, tod_fs3)
+        field_f = _apply_chirp(freq_rel, seed_field_f, gdd_fs2, tod_fs3, fod_fs4, fifth_fs5)
         time_fs, field_t = get_Et_from_Ef(freq_rel, field_f)
         field_t = _normalize_field(field_t)
         freq_rel, field_f = get_Ef_from_Et(time_fs, field_t)
